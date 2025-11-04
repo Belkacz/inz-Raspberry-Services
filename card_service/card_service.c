@@ -156,22 +156,16 @@ void buildPayloud(char ** cardList, int currentCardListSize)
     {
         if (cardList[i][0] != '\0')
         {
-            char entry[24]; // tymczasowy bufor dla jednej pary // 3473788805 to 9 + 6
-            snprintf(entry, sizeof(entry),"\"card%d\":%s,", i, cardList[i]);
+            char tmpCardStr[24]; // tymczasowy bufor dla jednej pary // 3473788805 to 9 + 6
+            snprintf(tmpCardStr, sizeof(tmpCardStr),"\"card%d\":%s,", i, cardList[i]);
 
-            strncat(payload, entry, MAX_PAYLOAD - strlen(payload) - 1);
+            strncat(payload, tmpCardStr, MAX_PAYLOAD - strlen(payload) - 1);
             cardCount++;
         }
     }
-
-    // usuń ostatni przecinek, jeśli był
-    size_t len = strlen(payload);
-    if (len > 1 && payload[len - 1] == ',')
-        payload[len - 1] = '\0';
-
-    // zamknij JSON
-    strncat(payload, "}", MAX_PAYLOAD - strlen(payload) - 1);
-    fprintf(stderr, "payload = %s", payload);
+    snprintf(payload + strlen(payload),  // wrzucenie na koniec countera
+         MAX_PAYLOAD - strlen(payload), 
+         "\"cardCounter\":%d}", cardCount);
 }
 
 // callback WebSocket
