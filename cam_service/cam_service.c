@@ -10,42 +10,52 @@
 #define MAX_FRAME_SIZE (4 * 1024 * 1024)
 #define FPS 30
 
-static unsigned char frameBuffer[MAX_FRAME_SIZE];
-static size_t frameSize = 0;
-static volatile int hasNewFrame = 0;
-static volatile bool connectionEstablished = false;
+typedef struct {
+    unsigned char frameBuffer[MAX_FRAME_SIZE];
+    size_t frameSize;
+    volatile int hasNewFrame;
+    volatile bool connectionEstablished;
+} AppState;
 
 static void callbackUVC(uvc_frame_t *frame, void *ptr)
 {
-    if (frame->data_bytes > MAX_FRAME_SIZE) return;
+    AppState *state = (AppState*)ptr;
+    if (frame->data_bytes > MAX_FRAME_SIZE)
+    {
+        return;
+    }
     
-    memcpy(frameBuffer, frame->data, frame->data_bytes);
-    frameSize = frame->data_bytes;
-    hasNewFrame = 1;
+    memcpy(state->frameBuffer, frame->data, frame->data_bytes);
+    state->frameSize = frame->data_bytes;
+    state->hasNewFrame = 1;
 }
 
 static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
                       void *user, void *in, size_t len)
 {
+    in=in;   // Wycisz ostrzeżenie
+    len=len;
+    user=user;
+    AppState *state = (AppState *)lws_context_user(lws_get_context(wsi));
     switch (reason)
     {
     case LWS_CALLBACK_ESTABLISHED:
         // printf("✓ Klient połączony\n");
         lwsl_user("Nowe połączenie WebSocket\n");
-        connectionEstablished = true;
+        state->connectionEstablished = true;
         lws_callback_on_writable(wsi);
         break;
         
     case LWS_CALLBACK_SERVER_WRITEABLE:
-        if (hasNewFrame && frameSize > 0)
+        if (state->hasNewFrame && state->frameSize > 0)
         {
-            unsigned char *buf = malloc(LWS_PRE + frameSize);
+            unsigned char *buf = malloc(LWS_PRE + state->frameSize);
             if (buf)
             {
-                memcpy(buf + LWS_PRE, frameBuffer, frameSize);
-                lws_write(wsi, buf + LWS_PRE, frameSize, LWS_WRITE_BINARY);
+                memcpy(buf + LWS_PRE, state->frameBuffer, state->frameSize);
+                lws_write(wsi, buf + LWS_PRE, state->frameSize, LWS_WRITE_BINARY);
                 free(buf);
-                hasNewFrame = 0;
+                state->hasNewFrame = 0;
             }
         }
         lws_callback_on_writable(wsi);
@@ -54,7 +64,7 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
     case LWS_CALLBACK_CLOSED:
         // printf("Klient rozłączony\n");
         lwsl_user("Połączenie WebSocket zakończone\n");
-        connectionEstablished = false;
+        state->connectionEstablished = false;
         break;
     default:
         break;
@@ -62,16 +72,21 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
     return 0;
 }
 
-static struct lws_protocols protocols[] = {
-    { "cam-protocol", callbackWs, 0, MAX_FRAME_SIZE },
-    { NULL, NULL, 0, 0 }
-};
-
 int main(void)
 {
+    signal(SIGINT, handleSignal);
+    signal(SIGTERM, handleSignal);
+    signal(SIGSEGV, handleSignal);
+    signal(SIGABRT, handleSignal);
     FILE *logFile = fopen("/var/log/camService.log", "a");
     setvbuf(logFile, NULL, _IOLBF, 0);
     stderr = logFile;
+
+    AppState state = {
+        .frameSize = 0,
+        .hasNewFrame = 0,
+        .connectionEstablished = false
+    };
 
     uvc_context_t *camContext;
     uvc_device_t *device;
@@ -116,11 +131,19 @@ int main(void)
         return 1;
     }
 
+    struct lws_protocols protocols[] =
+    {   
+        // const char *name, lws_callback_function *callback , size_t per_session_data_size, size_t rx_buffer_size, unsigned int id , void *user, size_t tx_packet_size
+        { "cam-protocol", callbackWs, 0, MAX_FRAME_SIZE, 0, NULL, 0},
+        { NULL, NULL, 0, 0, 0, NULL, 0 }
+    };
+
     // WebSocket serwer
     struct lws_context_creation_info info;
     memset(&info, 0, sizeof info);
     info.port = PORT;
     info.protocols = protocols;
+    info.user = &state;
 
     lwsContext = lws_create_context(&info);
     if (!lwsContext)
@@ -133,9 +156,10 @@ int main(void)
     while (!stopRequested)
     {
         // Start isStreaming gdy klient się połączy
-        if (connectionEstablished && !isStreaming)
+        if (state.connectionEstablished && !isStreaming)
         {
-            res = uvc_start_streaming(devHandler, &streamCtrl, callbackUVC, NULL, 0);
+            // uvc_device_handle_t *devh, uvc_stream_ctrl_t *ctrl, uvc_frame_callback_t *cb,void *user_ptr, uint8_t flags
+            res = uvc_start_streaming(devHandler, &streamCtrl, callbackUVC, &state, 0);
             if (res < 0)
             {
                 uvc_perror(res, "start_streaming");
@@ -147,7 +171,7 @@ int main(void)
         }
         
         // Stop isStreaming gdy klient się rozłączy
-        if (!connectionEstablished && isStreaming)
+        if (!state.connectionEstablished && isStreaming)
         {
             printf("Rozłączono – zatrzymuję stream\n");
             uvc_stop_streaming(devHandler);
@@ -166,6 +190,11 @@ int main(void)
     uvc_unref_device(device);
     uvc_exit(camContext);
     lws_context_destroy(lwsContext);
+
+    if (logFile)
+    {
+        fclose(logFile);
+    }
 
     return 0;
 }
