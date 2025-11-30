@@ -13,11 +13,15 @@
 #define STREAM_FPS 20  // Docelowy FPS dla WebSocket
 
 typedef struct {
+    // WebSocket
+    volatile bool connectionEstablished;
+
+    struct timespec lastSentTime;
+
+    // Kamera
     unsigned char frameBuffer[MAX_FRAME_SIZE];
     size_t frameSize;
     volatile int hasNewFrame;
-    volatile bool connectionEstablished;
-    struct timespec lastSentTime;
 } AppState;
 
 // Pomocnicza funkcja do liczenia różnicy czasu w ms

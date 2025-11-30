@@ -17,9 +17,8 @@
 #include <signal.h>
 #include <time.h>
 #include <sys/time.h>
+#include "common.h"
 
-#define PIR_PIN1 26
-#define PIR_PIN2 16
 #define MAX_PAYLOAD 1024
 #define CARD_INPUT "/dev/hidraw0"
 #define CARD_NUMBER 24
@@ -27,29 +26,21 @@
 #define PORT 2139
 
 /* Wspólne zmienne */
-static char payload[MAX_PAYLOAD];
-static struct lws_context *lwsContext = NULL;
-static struct lws *globalWsi = NULL;
-static bool connectionEstablished = false;
-static bool requestSend = false;
-static volatile bool stopRequested = false;
-
-int currentCardListSizeGlobal = CARD_NUMBER; // zmienna list kart dla callbackLWS
-char **cardListGlobal = NULL;
-
-/* mutex */
-static pthread_mutex_t mutexState = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t payloadCond = PTHREAD_COND_INITIALIZER;
-
-void handleSignal(int sig)
-{
-    printf("\n[!] Otrzymano sygnał %d — zatrzymywanie programu...\n", sig);
-    stopRequested = true;
-    if (lwsContext)
-    {
-        lws_cancel_service(lwsContext);  // przerywa lws_service()
-    }
-}
+typedef struct {
+    // WebSocket
+    struct lws *wsi;
+    bool connectionEstablished;
+    bool requestSend;
+    
+    // Karty
+    char **cardList;
+    int currentCardListSize;
+    char payload[MAX_PAYLOAD];
+    
+    // Synchronizacja
+    pthread_mutex_t mutex;
+    pthread_cond_t payloadCond;
+} AppState;
 
 int findCardInList(const char *card, const char** cardList, int cardListLen)
 {
@@ -69,69 +60,22 @@ int checkEmptySlots(char** cardList, int cardListLen)
     return emptyCount;
 }
 
-int resizeBuffer(char*** cardList, int cardListLen, int emptySlots) // niepotrzebne w aktualnym staium rozwoju
-{
-    if (emptySlots == 0)
-    {
-        int newLen = cardListLen + CARD_NUMBER;
-        char **tmpCardList = realloc(*cardList, newLen * sizeof(char *));
-        if (!tmpCardList)
-        {
-            perror("realloc failed (expand)");
-            return cardListLen; // zachowujemy starą długość
-        }
-        for (int i = cardListLen; i < newLen; i++)
-        {
-            tmpCardList[i] = calloc(MAX_CARD_LEN, sizeof(char));
-            if (!tmpCardList[i])
-            {
-                fprintf(stderr, "calloc failed for new slot no %d\n", i);
-            }
-        }
-        *cardList = tmpCardList;
-        printf("[resizeBuffer] Expanded to %d slots\n", newLen);
-        return newLen;
-    } else if (emptySlots > CARD_NUMBER)
-        {
-            int newLen = cardListLen - (emptySlots - CARD_NUMBER);
-            if (newLen < CARD_NUMBER)
-                newLen = CARD_NUMBER;
-
-            // zwolnij nadmiarowe elementy
-            for (int i = newLen; i < cardListLen; i++)
-                free((*cardList)[i]);
-
-            char **tmp = realloc(*cardList, newLen * sizeof(char *));
-            if (!tmp)
-            {
-                perror("realloc failed when downgrading the buffer size");
-                return cardListLen;
-            }
-
-            *cardList = tmp;
-            printf("[resizeBuffer] Downgraded Buffer card to %d slots\n", newLen);
-            return newLen;
-        }
-
-        printf("[resizeBuffer] No resize needed (%d free slots)\n", emptySlots);
-        return cardListLen;
-}
-
 int addCardToList(const char *card, char*** cardList, int cardListLen)
 {
     for (int i = 0; i < cardListLen; i++)
     {
         if ((*cardList)[i][0] == '\0')
         {
-            strncpy((*cardList)[i], card, MAX_CARD_LEN - 1);
-            (*cardList)[i][MAX_CARD_LEN - 1] = '\0';
+            size_t len = strlen(card);
+            memcpy((*cardList)[i], card, len);
+            (*cardList)[i][len] = '\0';
             return 1;
         }
     }
     return -1;
 }
 
-int removeCardFromList(const char *card, int cardIdx, char ***cardList, int cardListLen)
+int removeCardFromList(int cardIdx, char ***cardList, int cardListLen)
 {
     if (cardIdx < 0 || cardIdx >= cardListLen)
         return -1;
@@ -146,25 +90,25 @@ int removeCardFromList(const char *card, int cardIdx, char ***cardList, int card
     return 0;
 }
 
-void buildPayloud(char ** cardList, int currentCardListSize)
+void buildPayloud(AppState *state)
 {
-    payload[0] = '\0';
-    strncat(payload, "{", MAX_PAYLOAD - 1);
+    state->payload[0] = '\0';
+    strncat(state->payload, "{", MAX_PAYLOAD - 1);
 
     int cardCount = 0;
-    for (int i = 0; i < currentCardListSize; i++)
+    for (int i = 0; i < state->currentCardListSize; i++)
     {
-        if (cardList[i][0] != '\0')
+        if (state->cardList[i][0] != '\0')  
         {
             char tmpCardStr[24]; // tymczasowy bufor dla jednej pary // 3473788805 to 9 + 6
-            snprintf(tmpCardStr, sizeof(tmpCardStr),"\"card%d\":%s,", i, cardList[i]);
+            snprintf(tmpCardStr, sizeof(tmpCardStr),"\"card%d\":%s,", i, state->cardList[i]);
 
-            strncat(payload, tmpCardStr, MAX_PAYLOAD - strlen(payload) - 1);
+            strncat(state->payload, tmpCardStr, MAX_PAYLOAD - strlen(state->payload) - 1);
             cardCount++;
         }
     }
-    snprintf(payload + strlen(payload),  // wrzucenie na koniec countera
-         MAX_PAYLOAD - strlen(payload), 
+    snprintf(state->payload + strlen(state->payload),  // wrzucenie na koniec countera
+         MAX_PAYLOAD - strlen(state->payload), 
          "\"cardCounter\":%d}", cardCount);
 }
 
@@ -172,33 +116,36 @@ void buildPayloud(char ** cardList, int currentCardListSize)
 static int callbackLWS(struct lws *wsi, enum lws_callback_reasons reason,
                        void *user, void *in, size_t len)
 {
+    user=user;
+    in=in;
+    len=len;
+    AppState *state = (AppState *)lws_context_user(lws_get_context(wsi));
     switch (reason) {
         case LWS_CALLBACK_ESTABLISHED:
             lwsl_user("Nowe połączenie WebSocket\n");
-            pthread_mutex_lock(&mutexState);
-            connectionEstablished = true;
-            globalWsi = wsi;
-            buildPayloud(cardListGlobal, currentCardListSizeGlobal);
-            lws_callback_on_writable(globalWsi);
-            pthread_mutex_unlock(&mutexState);
+            pthread_mutex_lock(&state->mutex);
+            state->connectionEstablished = true;
+            state->wsi = wsi;
+            buildPayloud(state);
+            lws_callback_on_writable(state->wsi);
+            pthread_mutex_unlock(&state->mutex);
             break;
 
         case LWS_CALLBACK_SERVER_WRITEABLE:
         {
             char message[MAX_PAYLOAD] = "\0";
-            printf("payload = %s \n");
-            pthread_mutex_lock(&mutexState);
-            if(!(payload[0] == '\0'))
+            pthread_mutex_lock(&state->mutex);
+            if(!(state->payload[0] == '\0'))
             {
-                strncpy(message, payload, MAX_PAYLOAD-1);
-                message[MAX_PAYLOAD-1] = '\0';
-                // payload[0] = '\0';
+                len = strlen(state->payload);
+                memcpy(message, state->payload, len);
+                message[len]= '\0';
             }
-            pthread_mutex_unlock(&mutexState);
+            pthread_mutex_unlock(&state->mutex);
 
             if (message[0] == '\0')
             {
-                strncpy(message, "{}", sizeof(message)-1);
+                strcpy(message, "{}");
             }
 
             unsigned char buffer[LWS_PRE + MAX_PAYLOAD];
@@ -212,10 +159,10 @@ static int callbackLWS(struct lws *wsi, enum lws_callback_reasons reason,
 
         case LWS_CALLBACK_CLOSED:
             lwsl_user("Połączenie zamknięte\n");
-            pthread_mutex_lock(&mutexState);
-            globalWsi = NULL;
-            connectionEstablished = false;
-            pthread_mutex_unlock(&mutexState);
+            pthread_mutex_lock(&state->mutex);
+            state->wsi = NULL;
+            state->connectionEstablished = false;
+            pthread_mutex_unlock(&state->mutex);
             break;
 
         default:
@@ -224,19 +171,23 @@ static int callbackLWS(struct lws *wsi, enum lws_callback_reasons reason,
     return 0;
 }
 
-// protokoły LWS
-static const struct lws_protocols protocols[] = {
-    {"card-protocol", callbackLWS, 0, MAX_PAYLOAD},
-    {NULL, NULL, 0, 0}
-};
-
 // wątek WebSocket (LWS)
 void *wsThread(void *arg)
 {
+    struct lws_protocols protocols[] =
+    {   
+        // const char *name, lws_callback_function *callback , size_t per_session_data_size, size_t rx_buffer_size, unsigned int id , void *user, size_t tx_packet_size
+        { "card-protocol", callbackLWS, 0, MAX_PAYLOAD, 0, NULL, 0},
+        { NULL, NULL, 0, 0, 0, NULL, 0 }
+    };
+
+    AppState *state  = (AppState*)arg;
+
     struct lws_context_creation_info info;
     memset(&info, 0, sizeof(info));
     info.port = PORT;
     info.protocols = protocols;
+    info.user = state;
 
     lwsContext = lws_create_context(&info);
     if (!lwsContext)
@@ -249,18 +200,18 @@ void *wsThread(void *arg)
     while (!stopRequested)
     {
         lws_service(lwsContext, 10);
-        pthread_mutex_lock(&mutexState);
-        if (connectionEstablished && requestSend && globalWsi)
+        pthread_mutex_lock(&state->mutex);
+        if (state->connectionEstablished && state->requestSend && state->wsi)
         {
-            lws_callback_on_writable(globalWsi);
-            requestSend = false;
+            lws_callback_on_writable(state->wsi);
+            state->requestSend = false;
         }
         
         // Jeśli połączony - czekaj na sygnał (z timeoutem)
-        if (connectionEstablished && globalWsi)
+        if (state->connectionEstablished && state->wsi)
         {
             struct timespec delay;
-            clock_gettime(CLOCK_REALTIME, &delay);
+            clock_gettime(CLOCK_MONOTONIC, &delay);
 
             unsigned long hundredMilliseconds = 100 * 1000000UL;
             delay.tv_nsec += hundredMilliseconds;
@@ -270,11 +221,11 @@ void *wsThread(void *arg)
                 delay.tv_sec += 1;
                 delay.tv_nsec -= 1000000000L;
             }
-            pthread_cond_timedwait(&payloadCond, &mutexState, &delay);
+            pthread_cond_timedwait(&state->payloadCond, &state->mutex, &delay);
         }
         
-        pthread_mutex_unlock(&mutexState);
-        if (!connectionEstablished)
+        pthread_mutex_unlock(&state->mutex);
+        if (!state->connectionEstablished)
         {
             usleep(100000); // 100ms
         }
@@ -288,28 +239,26 @@ void *wsThread(void *arg)
 // wątek do wczytania kart
 void *cardThread(void *arg)
 {
-    int currentCardListSize = CARD_NUMBER;
-    char **cardList = calloc(currentCardListSize, sizeof(char*));
+    AppState *state  = (AppState*)arg;
+    state->currentCardListSize = CARD_NUMBER;
+    state->cardList = calloc(state->currentCardListSize, sizeof(char*));
 
-    if (!cardList)
+    if (!state->cardList)
     {
-        fprintf(stderr, "cardList calloc failed\n");
+        fprintf(stderr, "[cardThread] cardList calloc failed\n");
         return NULL;
     }
-    for (int i = 0; i < currentCardListSize; i++)
+    for (int i = 0; i < state->currentCardListSize; i++)
     {
-        cardList[i] = calloc(MAX_CARD_LEN, sizeof(char));
-        cardListGlobal = calloc(MAX_CARD_LEN, sizeof(char));
-        if (!cardList[i])
+        state->cardList[i] = calloc(MAX_CARD_LEN, sizeof(char));
+        if (!state->cardList[i])
         {
             fprintf(stderr, "failed calloc for cardList item no %d \n", i);
-            for (int j = 0; j < i; j++) free(cardList[j]);
-            free(cardList);
+            for (int j = 0; j < i; j++) free(state->cardList[j]);
+            free(state->cardList);
             return NULL;
         }
     }
-    currentCardListSizeGlobal = CARD_NUMBER;
-    cardListGlobal = cardList; // XD
 
     char cardBuf[MAX_CARD_LEN] = {0};
     size_t cardPos = 0;
@@ -318,8 +267,8 @@ void *cardThread(void *arg)
     if (file < 0)
     {
         fprintf(stderr, "Open Card Input Error");
-        for (int i = 0; i < currentCardListSize; i++) free(cardList[i]);
-        free(cardList);
+        for (int i = 0; i < state->currentCardListSize; i++) free(state->cardList[i]);
+        free(state->cardList);
         return NULL;
     }
 
@@ -344,69 +293,31 @@ void *cardThread(void *arg)
                 if (cardPos > 0)
                 {
                     cardBuf[cardPos] = '\0';
-                    pthread_mutex_lock(&mutexState);
+                    pthread_mutex_lock(&state->mutex);
                     
                     // Logika dodawania/usuwania karty
-                    int ret = findCardInList(cardBuf, (const char**)cardList, currentCardListSize);
+                    int ret = findCardInList(cardBuf, (const char**)state->cardList, state->currentCardListSize);
                     if (ret == -1)
                     {
-                        addCardToList(cardBuf, &cardList, currentCardListSize);
-                        // printf("[CARD] Dodano kartę do listy\n");
+                        addCardToList(cardBuf, &state->cardList, state->currentCardListSize);
                     } else {
-                        removeCardFromList(cardBuf, ret, &cardList, currentCardListSize);
-                        // printf("[CARD] Usunięto kartę z listy\n");
+                        removeCardFromList(ret, &state->cardList, state->currentCardListSize);
                     }
-
-                    int emptySlots = checkEmptySlots(cardList, currentCardListSize);
-                    if (emptySlots == 0 || emptySlots > CARD_NUMBER)
-                    {
-                        currentCardListSize = resizeBuffer(&cardList, currentCardListSize, emptySlots);
-                    }
-                    // cardListGlobal = cardList;
-                    // currentCardListSizeGlobal = currentCardListSize;
 
                     // Budowanie payload
-                    payload[0] = '\0';
-                    // strncat(payload, "{", MAX_PAYLOAD - 1);
+                    state->payload[0] = '\0';
+                    buildPayloud(state);
 
-                    // int cardCount = 0;
-                    // for (int i = 0; i < currentCardListSize; i++){
-                    //     if (cardList[i][0] != '\0') {
-                    //         char entry[24]; // tymczasowy bufor dla jednej pary // 3473788805 to 9 + 6
-                    //         snprintf(entry, sizeof(entry),"\"card%d\":%s,", i, cardList[i]);
-
-                    //         strncat(payload, entry, MAX_PAYLOAD - strlen(payload) - 1);
-                    //         cardCount++;
-                    //     }
-                    // }
-
-                    // // usuń ostatni przecinek, jeśli był
-                    // size_t len = strlen(payload);
-                    // if (len > 1 && payload[len - 1] == ',')
-                    //     payload[len - 1] = '\0';
-
-                    // // zamknij JSON
-                    // strncat(payload, "}", MAX_PAYLOAD - strlen(payload) - 1);
-                    // fprintf(stderr, "payload = %s", payload);
-                    buildPayloud(cardList, currentCardListSize);
-                    int currentCardListSizeGlobal = CARD_NUMBER;
-
-                    requestSend = true;
-                    
-                    if (connectionEstablished && globalWsi)
+                    // przekazanie informacji o wysyłce
+                    state->requestSend = true;
+                    if (state->connectionEstablished && state->wsi)
                     {
-                        lws_callback_on_writable(globalWsi);
+                        lws_callback_on_writable(state->wsi);
                         lws_cancel_service(lwsContext);
                     }
                     cardPos = 0;
-                    pthread_cond_signal(&payloadCond);
-                    pthread_mutex_unlock(&mutexState);
-
-                    // printf("[CARD] Aktualna lista:\n");
-                    // for (int i = 0; i < currentCardListSize; i++) {
-                    //     if(cardList[i][0] != '\0')
-                    //         printf("  [%d] = %s\n", i, cardList[i]);
-                    // }
+                    pthread_cond_signal(&state->payloadCond);
+                    pthread_mutex_unlock(&state->mutex);
                 }
             } else if (code > 0x03 && code < 0x28)
             {
@@ -418,28 +329,44 @@ void *cardThread(void *arg)
                 }
             }
         }
-        // fprintf(stderr, " [ThredCard] >>> [%d][%s] <<<\n", __LINE__, __func__);
     }
 
     close(file);
-    for (int i = 0; i < currentCardListSize; i++) free(cardList[i]);
-    free(cardList);
+    for (int i = 0; i < state->currentCardListSize; i++) free(state->cardList[i]);
+    free(state->cardList);
     return NULL;
 }
 int main(void)
 {
-    payload[0] = '\0';
+    // Rejestracja handlerów sygnałów
     signal(SIGINT, handleSignal);
     signal(SIGTERM, handleSignal);
+    signal(SIGSEGV, handleSignal);
+    signal(SIGABRT, handleSignal);
 
     FILE *logFile = fopen("/var/log/cardService.log", "a");
+
+    // Inicjalizacja AppState
+    AppState state = {
+        .payload = "\0",
+        .wsi = NULL,
+        .connectionEstablished = false,
+        .currentCardListSize = CARD_NUMBER,
+        .cardList = NULL,
+        .requestSend = false
+    };
+
+    // Inicjalizacja mutex i condition variable
+    pthread_mutex_init(&state.mutex, NULL);
+    pthread_cond_init(&state.payloadCond, NULL);
+
     setvbuf(logFile, NULL, _IOLBF, 0);
     stderr = logFile;
 
-    pthread_t tid_ws, tid_card;
+    pthread_t thread_ws, thread_card;
     int ret;
 
-    ret = pthread_create(&tid_ws, NULL, wsThread, NULL);
+    ret = pthread_create(&thread_ws, NULL, wsThread, &state);
     if (ret != 0)
     {
         fprintf(stderr, "pthread_create wsThread failed: %s\n", strerror(ret));
@@ -448,15 +375,22 @@ int main(void)
 
     sleep(1);
 
-    ret = pthread_create(&tid_card, NULL, cardThread, NULL);
+    ret = pthread_create(&thread_card, NULL, cardThread, &state);
     if (ret != 0)
     {
         fprintf(stderr, "pthread_create cardThread failed: %s\n", strerror(ret));
         return 1;
     }
 
-    pthread_join(tid_card, NULL);
-    pthread_join(tid_ws, NULL);
+    pthread_join(thread_card, NULL);
+    pthread_join(thread_ws, NULL);
 
+    pthread_mutex_destroy(&state.mutex);
+    pthread_cond_destroy(&state.payloadCond);
+    
+    if (logFile)
+    {
+        fclose(logFile);
+    }
     return 0;
 }
