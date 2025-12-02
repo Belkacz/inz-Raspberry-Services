@@ -1,7 +1,7 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -I.. -Ilibuvc/include
-LDFLAGS = -Llibuvc/lib -Lopenpnp-capture/lib
-LIBS = -luvc -lopenpnp-capture -lwebsockets -lpthread -lm
+LDFLAGS = -Llibuvc/lib
+LIBS = -luvc -lwebsockets -lpthread
 
 TARGET = cam_service
 SOURCES = cam_service.c ../common.c
