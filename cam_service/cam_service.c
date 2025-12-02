@@ -10,7 +10,9 @@
 #define PORT 2138
 #define MAX_FRAME_SIZE (4 * 1024 * 1024)
 #define FPS 30
-#define STREAM_FPS 20  // Docelowy FPS dla WebSocket
+#define STREAM_FPS 10  // Docelowy FPS dla WebSocket
+#define LWS_TIMEOUT_MS (1000 / STREAM_FPS)
+#define FPS_INTERVAL (1000 / STREAM_FPS)
 
 typedef struct {
     // WebSocket
@@ -37,6 +39,14 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
     
     // Podstawowe sprawdzenia
     if (!frame || frame->data_bytes == 0 || frame->data_bytes > MAX_FRAME_SIZE)
+    {
+        return;
+    }
+
+    struct timespec timeNow;
+    clock_gettime(CLOCK_MONOTONIC, &timeNow);
+    long long elapsedTime = timespec_diff_ms(&state->lastSentTime, &timeNow);
+    if (elapsedTime < FPS_INTERVAL)
     {
         return;
     }
@@ -86,10 +96,8 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
         clock_gettime(CLOCK_MONOTONIC, &timeNow);
         long long elapsedTime = timespec_diff_ms(&state->lastSentTime, &timeNow);
 
-        // Oblicz minimalny interwał (w ms) między ramkami
-        long long fpsInterval = 1000 / STREAM_FPS;
-
-        if (elapsedTime < fpsInterval) {
+        if (elapsedTime < FPS_INTERVAL)
+        {
             // Za wcześnie - pomiń tę ramkę
             // Poproś o kolejne wywołanie w następnym cyklu
             lws_callback_on_writable(wsi);
@@ -216,7 +224,7 @@ int main(void)
             res = uvc_start_streaming(devHandler, &streamCtrl, callbackUVC, &state, 0);
             if (res < 0)
             {
-                uvc_perror(res, "start_streaming");
+                uvc_perror(res, "streaming error");
             } else
             {
                 printf("Stream uruchomiony\n");
@@ -230,9 +238,8 @@ int main(void)
             uvc_stop_streaming(devHandler);
             isStreaming = false;
         }
-        
         // Obsługa WebSocket
-        lws_service(lwsContext, 10);
+        lws_service(lwsContext, LWS_TIMEOUT_MS);
     }
 
     // Cleanup
@@ -245,7 +252,7 @@ int main(void)
     uvc_exit(camContext);
     lws_context_destroy(lwsContext);
 
-        if (logFile)
+    if (logFile)
     {
         fclose(logFile);
     }

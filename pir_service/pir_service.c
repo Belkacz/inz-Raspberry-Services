@@ -17,7 +17,7 @@
 #define PIR_PIN2 16
 #define MAX_PAYLOAD 256
 #define PORT 2137
-#define STD_DEPLAY 10
+#define STD_DEPLAY 5
 
 static struct gpiod_chip *chip;
 static struct gpiod_line *line1, *line2;

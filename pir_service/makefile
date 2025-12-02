@@ -1,10 +1,9 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -I.. -Ilibuvc/include
-LDFLAGS = -Llibuvc/lib -Lopenpnp-capture/lib
-LIBS = -luvc -lopenpnp-capture -lwebsockets -lpthread -lm
+CFLAGS = -Wall -Wextra -O2 -I..
+LIBS = -lwebsockets -lgpiod
 
-TARGET = cam_service
-SOURCES = cam_service.c ../common.c
+TARGET = pir_service
+SOURCES = pir_service.c ../common.c
 OBJECTS = $(SOURCES:.c=.o)
 
 all: $(TARGET)
