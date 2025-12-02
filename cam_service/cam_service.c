@@ -8,7 +8,7 @@
 #include "common.h"
 
 #define PORT 2138
-#define MAX_FRAME_SIZE (4 * 1024 * 1024)
+#define MAX_FRAME_SIZE (2 * 1024 * 1024)
 #define FPS 30
 #define STREAM_FPS 10  // Docelowy FPS dla WebSocket
 #define LWS_TIMEOUT_MS (1000 / STREAM_FPS)
