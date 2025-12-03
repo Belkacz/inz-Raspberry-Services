@@ -157,8 +157,12 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
         
         // PRIORYTET 1: JSON z danymi ruchu
         long long elapsedJson = timespec_diff_ms(&state->lastJsonSendTime, &now);
+        long long elapsedPreview = timespec_diff_ms(&state->lastPreviewTime, &now);
+        long long previewInterval = 1000 / PREVIEW_FPS;
         
-        if (elapsedJson >= JSON_SEND_INTERVAL_MS)
+        bool need_json = elapsedJson >= JSON_SEND_INTERVAL_MS;
+        bool need_frame = elapsedPreview >= previewInterval;
+        if (need_json)
         {
             // Przygotuj JSON
             // printf("[WS] Wysyłam JSON\n");
@@ -189,16 +193,19 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
                 state->framesAnalyzed = 0;
                 state->motionFramesCount = 0;
                 state->lastJsonSendTime = now;
+                need_json = false;
+            }
+            if(need_json || need_frame)
+            {
+                lws_callback_on_writable(wsi);
             }
             
-            lws_callback_on_writable(wsi);
+            // 
             break;
         }
         
         // PRIORYTET 2: Klatka preview
-        long long elapsedPreview = timespec_diff_ms(&state->lastPreviewTime, &now);
-        long long previewInterval = 1000 / PREVIEW_FPS;
-        
+
         if (state->hasNewFrame && state->frameSize > 0 && elapsedPreview >= previewInterval)
         {
             unsigned char *buf = (unsigned char*)malloc(LWS_PRE + state->frameSize);
@@ -210,10 +217,15 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
                 free(buf);
                 state->hasNewFrame = 0;
                 state->lastPreviewTime = now;
+                need_frame = false;
+            }
+            if(need_json || need_frame)
+            {
+                lws_callback_on_writable(wsi);
             }
         }
         
-        lws_callback_on_writable(wsi);
+        // lws_callback_on_writable(wsi);
         break;
     }
     case LWS_CALLBACK_CLOSED:
@@ -391,15 +403,15 @@ int main(void)
         int timeout;
         if (state->connectionEstablished && state->needsSend)
         {
-            timeout = 5;  // Dszybki tiemout
+            timeout = 100;  // Dszybki tiemout
         } else if (state->connectionEstablished)
         {
-            timeout = LWS_TIMEOUT_MS;  // Normalny tryb
+            timeout = 100;  // Normalny tryb
         } else {
             timeout = 100;  // Brak połączenia - oszczędzaj CPU
         }
         usleep(30000);
-        lws_service(lwsContext, timeout);
+        lws_service(lwsContext, 100);
 
     }
 
