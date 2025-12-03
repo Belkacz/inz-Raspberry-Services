@@ -11,8 +11,8 @@
 #define PORT 2138
 #define MAX_FRAME_SIZE (2 * 1024 * 1024)
 #define FPS 30
-#define PREVIEW_FPS 5              // FPS dla wysyłania klatek przez WebSocket
-#define MOTION_CHECK_FPS 15        // FPS dla analizy ruchu
+#define PREVIEW_FPS 2              // FPS dla wysyłania klatek przez WebSocket
+#define MOTION_CHECK_FPS 10        // FPS dla analizy ruchu
 #define JSON_SEND_INTERVAL_MS 5000 // Interwał wysyłania JSON w milisekundach (5000ms = 5s)
 
 // Timeout dla lws_service - połowa interwału najszybszego FPS
@@ -325,7 +325,7 @@ int main(void)
 
     res = uvc_get_stream_ctrl_format_size(devHandler, &streamCtrl, 
                                           UVC_FRAME_FORMAT_MJPEG, 
-                                          640, 480, FPS);
+                                          640, 480, 0);
     if (res < 0)
     {
         uvc_perror(res, "get_stream_ctrl");
@@ -398,7 +398,7 @@ int main(void)
         } else {
             timeout = 100;  // Brak połączenia - oszczędzaj CPU
         }
-        usleep(3000);
+        usleep(30000);
         lws_service(lwsContext, timeout);
 
     }
