@@ -9,10 +9,10 @@
 #include "motion_detector.h"
 
 #define PORT 2138
-#define MAX_FRAME_SIZE (4 * 1024 * 1024)
+#define MAX_FRAME_SIZE (2 * 1024 * 1024)
 #define FPS 30
 #define PREVIEW_FPS 5              // FPS dla wysyłania klatek przez WebSocket
-#define MOTION_CHECK_FPS 10        // FPS dla analizy ruchu
+#define MOTION_CHECK_FPS 15        // FPS dla analizy ruchu
 #define JSON_SEND_INTERVAL_MS 5000 // Interwał wysyłania JSON w milisekundach (5000ms = 5s)
 
 // Timeout dla lws_service - połowa interwału najszybszego FPS
@@ -158,9 +158,10 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
         // PRIORYTET 1: JSON z danymi ruchu
         long long elapsedJson = timespec_diff_ms(&state->lastJsonSendTime, &now);
         
-        if (elapsedJson >= JSON_SEND_INTERVAL_MS) {
+        if (elapsedJson >= JSON_SEND_INTERVAL_MS)
+        {
             // Przygotuj JSON
-            printf("[WS] Wysyłam JSON\n");
+            // printf("[WS] Wysyłam JSON\n");
             snprintf(state->jsonBuffer, sizeof(state->jsonBuffer),
                     "{\"motion\":%s,\"timestamp\":%ld,\"framesAnalyzed\":%d,\"motionFrames\":%d}",
                     state->motionDetectedFlag ? "true" : "false",
@@ -171,7 +172,8 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
             size_t jsonLen = strlen(state->jsonBuffer);
             unsigned char *buf = (unsigned char*)malloc(LWS_PRE + jsonLen);
             
-            if (buf) {
+            if (buf)
+            {
                 memcpy(buf + LWS_PRE, state->jsonBuffer, jsonLen);
                 lws_write(wsi, buf + LWS_PRE, jsonLen, LWS_WRITE_TEXT);
                 free(buf);
@@ -197,9 +199,10 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
         long long elapsedPreview = timespec_diff_ms(&state->lastPreviewTime, &now);
         long long previewInterval = 1000 / PREVIEW_FPS;
         
-        if (state->hasNewFrame && state->frameSize > 0 && elapsedPreview >= previewInterval) {
+        if (state->hasNewFrame && state->frameSize > 0 && elapsedPreview >= previewInterval)
+        {
             unsigned char *buf = (unsigned char*)malloc(LWS_PRE + state->frameSize);
-            printf("[WS] Wysyłam FRAME \n");
+            // printf("[WS] Wysyłam FRAME \n");
             if (buf)
             {
                 memcpy(buf + LWS_PRE, state->frameBuffer, state->frameSize);
@@ -291,7 +294,8 @@ int main(void)
 
     // --- Inicjalizacja UVC ---
     res = uvc_init(&camContext, NULL);
-    if (res < 0) {
+    if (res < 0)
+    {
         uvc_perror(res, "uvc_init");
         motion_detector_destroy(state->motionDetector);
         free(state);
@@ -299,7 +303,8 @@ int main(void)
     }
 
     res = uvc_find_device(camContext, &device, 0, 0, NULL);
-    if (res < 0) {
+    if (res < 0)
+    {
         uvc_perror(res, "find_device");
         uvc_exit(camContext);
         motion_detector_destroy(state->motionDetector);
@@ -308,7 +313,8 @@ int main(void)
     }
 
     res = uvc_open(device, &devHandler);
-    if (res < 0) {
+    if (res < 0)
+    {
         uvc_perror(res, "uvc_open");
         uvc_unref_device(device);
         uvc_exit(camContext);
@@ -320,7 +326,8 @@ int main(void)
     res = uvc_get_stream_ctrl_format_size(devHandler, &streamCtrl, 
                                           UVC_FRAME_FORMAT_MJPEG, 
                                           640, 480, FPS);
-    if (res < 0) {
+    if (res < 0)
+    {
         uvc_perror(res, "get_stream_ctrl");
         uvc_close(devHandler);
         uvc_unref_device(device);
@@ -354,9 +361,9 @@ int main(void)
     }
 
     printf("Serwer WebSocket działa na ws://<IP>:%d\n", PORT);
-    printf("Preview FPS: %d, Motion check FPS: %d, JSON interval: %dms (%.2f FPS)\n", 
-           PREVIEW_FPS, MOTION_CHECK_FPS, JSON_SEND_INTERVAL_MS, 
-           1000.0 / JSON_SEND_INTERVAL_MS);
+    // printf("Preview FPS: %d, Motion check FPS: %d, JSON interval: %dms (%.2f FPS)\n", 
+    //        PREVIEW_FPS, MOTION_CHECK_FPS, JSON_SEND_INTERVAL_MS, 
+    //        1000.0 / JSON_SEND_INTERVAL_MS);
     
     while (!stopRequested)
     {
@@ -397,7 +404,8 @@ int main(void)
     }
 
     // Cleanup
-    if (isStreaming) {
+    if (isStreaming)
+    {
         uvc_stop_streaming(devHandler);
     }
     
@@ -409,7 +417,8 @@ int main(void)
     
     free(state);
 
-    if (logFile) {
+    if (logFile)
+    {
         fclose(logFile);
     }
 
