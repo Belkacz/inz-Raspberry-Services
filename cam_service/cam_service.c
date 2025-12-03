@@ -11,7 +11,6 @@
 #define MAX_FRAME_SIZE (2 * 1024 * 1024)
 #define FPS 30
 #define STREAM_FPS 15  // Docelowy FPS dla WebSocket
-#define LWS_TIMEOUT_MS (1000 / STREAM_FPS)
 #define FPS_INTERVAL (1000 / STREAM_FPS)
 
 typedef struct {
@@ -239,7 +238,7 @@ int main(void)
             isStreaming = false;
         }
         // Obsługa WebSocket
-        lws_service(lwsContext, LWS_TIMEOUT_MS);
+        lws_service(lwsContext, FPS_INTERVAL);
         usleep(30000);
     }
 
