@@ -11,47 +11,29 @@
 #define PORT 2138
 #define MAX_FRAME_SIZE (2 * 1024 * 1024)
 #define FPS 30
-#define PREVIEW_FPS 2              // FPS dla wysyłania klatek przez WebSocket
-#define MOTION_CHECK_FPS 10        // FPS dla analizy ruchu
-#define JSON_SEND_INTERVAL_MS 5000 // Interwał wysyłania JSON w milisekundach (5000ms = 5s)
-
-// Timeout dla lws_service - połowa interwału najszybszego FPS
-#define LWS_TIMEOUT_MS (1000 / PREVIEW_FPS / 2)
+#define STREAM_FPS 15  // Docelowy FPS dla WebSocket
+#define FPS_INTERVAL (1000 / STREAM_FPS)
+#define JSON_INTERVAL_MS 10000
 
 typedef struct {
     // WebSocket
     volatile bool connectionEstablished;
-    struct lws *current_wsi;
 
-    // Timery
-    struct timespec lastPreviewTime;
-    struct timespec lastMotionCheckTime;
-    struct timespec lastJsonSendTime;
-    struct timespec lastMotionTime;
+    struct timespec lastSentTime;
+    struct timespec lastJsonSentTime;
+    struct timespec lastFameSentTime;
 
-    // Bufory ramek
+    // Kamera
     unsigned char frameBuffer[MAX_FRAME_SIZE];
     size_t frameSize;
     volatile int hasNewFrame;
-    
-    unsigned char prevFrameBuffer[MAX_FRAME_SIZE];
-    size_t prevFrameSize;
-    bool hasPrevFrame;
-    
-    // Detekcja ruchu
+    volatile int frameCounter;
+    volatile bool motionDetectedFlag;
+
     void* motionDetector;
-    bool motionDetectedFlag;
-    int framesAnalyzed;
-    int motionFramesCount;
-    
-    // Bufory do wysyłania
-    char jsonBuffer[512];
-    bool hasJsonToSend;
-    
-    // Kontrola wysyłania
-    bool needsSend;
 } AppState;
 
+// Pomocnicza funkcja do liczenia różnicy czasu w ms
 static long long timespec_diff_ms(struct timespec *start, struct timespec *end)
 {
     return (end->tv_sec - start->tv_sec) * 1000LL + 
@@ -62,58 +44,46 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
 {
     AppState *state = (AppState*)ptr;
     
+    // Podstawowe sprawdzenia
     if (!frame || frame->data_bytes == 0 || frame->data_bytes > MAX_FRAME_SIZE)
+    {
         return;
-    
-    // Zapisz poprzednią klatkę przed nadpisaniem
-    if (state->frameSize > 0) {
-        memcpy(state->prevFrameBuffer, state->frameBuffer, state->frameSize);
-        state->prevFrameSize = state->frameSize;
-        state->hasPrevFrame = true;
     }
-    
-    // Zapisz nową klatkę
+
+    struct timespec timeNow;
+    clock_gettime(CLOCK_MONOTONIC, &timeNow);
+    long long elapsedTime = timespec_diff_ms(&state->lastSentTime, &timeNow);
+    if (elapsedTime < FPS_INTERVAL)
+    {
+        return;
+    }
+
+    unsigned char prevFrameBuffer[MAX_FRAME_SIZE];
+    size_t prevFrameSize;
+    memcpy(prevFrameBuffer, state->frameBuffer, state->frameSize);
+    prevFrameSize = state->frameSize;
+
     memcpy(state->frameBuffer, frame->data, frame->data_bytes);
     state->frameSize = frame->data_bytes;
     state->hasNewFrame = 1;
-    
-    // Sprawdź czy czas na detekcję ruchu
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    long long elapsedMotion = timespec_diff_ms(&state->lastMotionCheckTime, &now);
-    long long motionInterval = 1000 / MOTION_CHECK_FPS;
-    
-    if (elapsedMotion >= motionInterval && state->hasPrevFrame)
+    state->lastSentTime = timeNow;
+    state->frameCounter++;
+    if(state->frameCounter >= 30)
     {
-        // Wywołaj detekcję ruchu (C++)
+        state->frameCounter = 0;
+    }
+
+    if(prevFrameSize > 0 && state->frameCounter % 2 == 0)
+    {
         bool motionNow = motion_detector_detect(
             state->motionDetector,
             state->frameBuffer, state->frameSize,
-            state->prevFrameBuffer, state->prevFrameSize
+            prevFrameBuffer, prevFrameSize
         );
-        
-        state->framesAnalyzed++;
-        
-        if (motionNow) {
+        if(motionNow)
+        {
             state->motionDetectedFlag = true;
-            state->motionFramesCount++;
-            state->lastMotionTime = now;
         }
-        
-        state->lastMotionCheckTime = now;
-    }
-    
-    // Sprawdź czy nadszedł czas na wysłanie danych
-    long long elapsedJson = timespec_diff_ms(&state->lastJsonSendTime, &now);
-    long long elapsedPreview = timespec_diff_ms(&state->lastPreviewTime, &now);
-    
-    bool jsonReady = (elapsedJson >= JSON_SEND_INTERVAL_MS);
-    bool frameReady = (elapsedPreview >= (1000 / PREVIEW_FPS)) && state->hasNewFrame;
-    
-    // Wywołaj callback TYLKO gdy faktycznie mamy coś do wysłania
-    if ((jsonReady || frameReady) && state->current_wsi && !state->needsSend) {
-        state->needsSend = true;
-        lws_callback_on_writable(state->current_wsi);
     }
 }
 
@@ -125,114 +95,84 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
     (void)user;
     
     AppState *state = (AppState *)lws_context_user(lws_get_context(wsi));
-    if (!state) {
+    if (!state)
+    {
         return -1;
     }
-    
     switch (reason)
     {
     case LWS_CALLBACK_ESTABLISHED:
         fprintf(stderr, "[WS] Klient połączony\n");
+        lwsl_user("Nowe połączenie WebSocket\n");
         state->connectionEstablished = true;
-        state->current_wsi = wsi;
-        state->needsSend = false;
         
-        clock_gettime(CLOCK_MONOTONIC, &state->lastPreviewTime);
-        clock_gettime(CLOCK_MONOTONIC, &state->lastMotionCheckTime);
-        clock_gettime(CLOCK_MONOTONIC, &state->lastJsonSendTime);
+        // Zresetuj czas ostatniego wysłania
+        clock_gettime(CLOCK_MONOTONIC, &state->lastSentTime);
         
-        // Reset liczników
-        state->framesAnalyzed = 0;
-        state->motionFramesCount = 0;
-        state->motionDetectedFlag = false;
+        lws_callback_on_writable(wsi);
         break;
         
     case LWS_CALLBACK_SERVER_WRITEABLE:
     {
-        // Reset flagi na początku
-        state->needsSend = false;
-        
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        
-        // PRIORYTET 1: JSON z danymi ruchu
-        long long elapsedJson = timespec_diff_ms(&state->lastJsonSendTime, &now);
-        long long elapsedPreview = timespec_diff_ms(&state->lastPreviewTime, &now);
-        long long previewInterval = 1000 / PREVIEW_FPS;
-        
-        bool need_json = elapsedJson >= JSON_SEND_INTERVAL_MS;
-        bool need_frame = elapsedPreview >= previewInterval;
-        if (need_json)
+        if (!state->hasNewFrame || state->frameSize == 0)
         {
-            // Przygotuj JSON
-            // printf("[WS] Wysyłam JSON\n");
-            snprintf(state->jsonBuffer, sizeof(state->jsonBuffer),
-                    "{\"motion\":%s,\"timestamp\":%ld,\"framesAnalyzed\":%d,\"motionFrames\":%d}",
-                    state->motionDetectedFlag ? "true" : "false",
-                    now.tv_sec,
-                    state->framesAnalyzed,
-                    state->motionFramesCount);
-            
-            size_t jsonLen = strlen(state->jsonBuffer);
-            unsigned char *buf = (unsigned char*)malloc(LWS_PRE + jsonLen);
-            
-            if (buf)
-            {
-                memcpy(buf + LWS_PRE, state->jsonBuffer, jsonLen);
-                lws_write(wsi, buf + LWS_PRE, jsonLen, LWS_WRITE_TEXT);
-                free(buf);
-                
-                fprintf(stderr, "[JSON] Motion=%s, Analyzed=%d, MotionFrames=%d (interval: %lldms)\n",
-                       state->motionDetectedFlag ? "YES" : "NO",
-                       state->framesAnalyzed,
-                       state->motionFramesCount,
-                       elapsedJson);
-                
-                // Reset flag i liczników po wysłaniu
-                state->motionDetectedFlag = false;
-                state->framesAnalyzed = 0;
-                state->motionFramesCount = 0;
-                state->lastJsonSendTime = now;
-                need_json = false;
-            }
-            if(need_json || need_frame)
-            {
-                lws_callback_on_writable(wsi);
-            }
-            
-            // 
+            // Brak nowej ramki - poproś o kolejne wywołanie
+            lws_callback_on_writable(wsi);
             break;
         }
         
-        // PRIORYTET 2: Klatka preview
-
-        if (state->hasNewFrame && state->frameSize > 0 && elapsedPreview >= previewInterval)
+        // Sprawdź czy minął wystarczający czas od ostatniego wysłania
+        struct timespec timeNow;
+        clock_gettime(CLOCK_MONOTONIC, &timeNow);
+        long long elapesedJsonTime = timespec_diff_ms(&state->lastJsonSentTime, &timeNow);
+        long long elapesedFrameTime = timespec_diff_ms(&state->lastFameSentTime, &timeNow);
+        long long elapsedTime = timespec_diff_ms(&state->lastSentTime, &timeNow);
+        if(elapesedJsonTime > JSON_INTERVAL_MS)
+        {
+            char jsonBuffer[512];
+            snprintf(jsonBuffer, sizeof(jsonBuffer),
+                "{\"motion\":%s,\"timestamp\":%ld}",
+                state->motionDetectedFlag ? "true" : "false",
+                timeNow.tv_sec);
+            size_t jsonLen = strlen(jsonBuffer);
+            unsigned char *buf = (unsigned char*)malloc(LWS_PRE + jsonLen);
+            if (buf)
+            {
+                memcpy(buf + LWS_PRE, jsonBuffer, jsonLen);
+                int written = lws_write(wsi, buf + LWS_PRE, jsonLen, LWS_WRITE_TEXT);
+                free(buf);
+                state->motionDetectedFlag = false;
+                state->lastJsonSentTime = timeNow;
+                lws_callback_on_writable(wsi);
+                break;
+            }
+        } else if(elapsedTime < FPS_INTERVAL)
+        {
+            // Za wcześnie - pomiń tę ramkę
+            // Poproś o kolejne wywołanie w następnym cyklu
+            lws_callback_on_writable(wsi);
+            break;
+        } else
         {
             unsigned char *buf = (unsigned char*)malloc(LWS_PRE + state->frameSize);
-            // printf("[WS] Wysyłam FRAME \n");
             if (buf)
             {
                 memcpy(buf + LWS_PRE, state->frameBuffer, state->frameSize);
                 lws_write(wsi, buf + LWS_PRE, state->frameSize, LWS_WRITE_BINARY);
                 free(buf);
                 state->hasNewFrame = 0;
-                state->lastPreviewTime = now;
-                need_frame = false;
             }
-            if(need_json || need_frame)
-            {
-                lws_callback_on_writable(wsi);
-            }
+            state->lastFameSentTime = timeNow;
         }
-        
-        // lws_callback_on_writable(wsi);
+
+        lws_callback_on_writable(wsi);
         break;
     }
+        
     case LWS_CALLBACK_CLOSED:
         fprintf(stderr, "[WS] Klient rozłączony\n");
+        lwsl_user("Połączenie WebSocket zakończone\n");
         state->connectionEstablished = false;
-        state->current_wsi = NULL;
-        state->needsSend = false;
         break;
         
     default:
@@ -249,51 +189,35 @@ int main(void)
     signal(SIGABRT, handleSignal);
 
     FILE *logFile = fopen("/var/log/camService.log", "a");
-    if (logFile) {
-        setvbuf(logFile, NULL, _IOLBF, 0);
-        stderr = logFile;
-    }
+    setvbuf(logFile, NULL, _IOLBF, 0);
+    stderr = logFile;
 
-    // Inicjalizacja parametrów detekcji ruchu
     MotionParams motionParams = {
         .motionThreshold = 20,
         .minArea = 200,
         .gaussBlur = 21
     };
 
-    // ALOKUJ AppState NA STERCIE
-    AppState *state = (AppState*)calloc(1, sizeof(AppState));
-    if (!state) {
-        fprintf(stderr, "Błąd: nie udało się zaalokować pamięci dla AppState\n");
-        return 1;
-    }
-    
-    // Inicjalizuj pola
-    state->frameSize = 0;
-    state->hasNewFrame = 0;
-    state->connectionEstablished = false;
-    state->current_wsi = NULL;
-    state->prevFrameSize = 0;
-    state->hasPrevFrame = false;
-    state->motionDetectedFlag = false;
-    state->framesAnalyzed = 0;
-    state->motionFramesCount = 0;
-    state->hasJsonToSend = false;
-    state->needsSend = false;
-    state->lastPreviewTime.tv_sec = 0;
-    state->lastPreviewTime.tv_nsec = 0;
-    state->lastMotionCheckTime.tv_sec = 0;
-    state->lastMotionCheckTime.tv_nsec = 0;
-    state->lastJsonSendTime.tv_sec = 0;
-    state->lastJsonSendTime.tv_nsec = 0;
-    state->lastMotionTime.tv_sec = 0;
-    state->lastMotionTime.tv_nsec = 0;
-    
-    // Inicjalizuj detektor ruchu
-    state->motionDetector = motion_detector_init(640, 480, motionParams);
-    if (!state->motionDetector) {
+    struct timespec timeNow;
+    clock_gettime(CLOCK_MONOTONIC, &timeNow);
+
+    AppState state = {
+        .connectionEstablished = false,
+        .lastSentTime = {0, 0},
+        .lastJsonSentTime = timeNow,
+        .lastFameSentTime = timeNow,
+        .frameBuffer = {0},              // opcjonalne, ale usuwa warning
+        .frameSize = 0,
+        .hasNewFrame = 0,
+        .frameCounter = 0,
+        .motionDetectedFlag = false,
+        .motionDetector = motion_detector_init(640, 480, motionParams)
+    };
+
+    if (!state.motionDetector)
+    {
         fprintf(stderr, "Błąd: nie udało się zainicjalizować detektora ruchu\n");
-        free(state);
+        motion_detector_destroy(state.motionDetector);
         return 1;
     }
 
@@ -309,8 +233,7 @@ int main(void)
     if (res < 0)
     {
         uvc_perror(res, "uvc_init");
-        motion_detector_destroy(state->motionDetector);
-        free(state);
+        motion_detector_destroy(state.motionDetector);
         return 1;
     }
 
@@ -318,9 +241,8 @@ int main(void)
     if (res < 0)
     {
         uvc_perror(res, "find_device");
+        motion_detector_destroy(state.motionDetector);
         uvc_exit(camContext);
-        motion_detector_destroy(state->motionDetector);
-        free(state);
         return 1;
     }
 
@@ -330,13 +252,11 @@ int main(void)
         uvc_perror(res, "uvc_open");
         uvc_unref_device(device);
         uvc_exit(camContext);
-        motion_detector_destroy(state->motionDetector);
-        free(state);
+        motion_detector_destroy(state.motionDetector);
         return 1;
     }
 
-    res = uvc_get_stream_ctrl_format_size(devHandler, &streamCtrl, 
-                                          UVC_FRAME_FORMAT_MJPEG, 
+    res = uvc_get_stream_ctrl_format_size(devHandler, &streamCtrl, UVC_FRAME_FORMAT_MJPEG, 
                                           640, 480, 0);
     if (res < 0)
     {
@@ -344,13 +264,14 @@ int main(void)
         uvc_close(devHandler);
         uvc_unref_device(device);
         uvc_exit(camContext);
-        motion_detector_destroy(state->motionDetector);
-        free(state);
+        motion_detector_destroy(state.motionDetector);
         return 1;
     }
 
     // --- WebSocket ---
-    struct lws_protocols protocols[] = {   
+    struct lws_protocols protocols[] =
+    {   
+        // const char *name, lws_callback_function *callback , size_t per_session_data_size, size_t rx_buffer_size, unsigned int id , void *user, size_t tx_packet_size
         { "cam-protocol", callbackWs, 0, MAX_FRAME_SIZE, 0, NULL, 0},
         { NULL, NULL, 0, 0, 0, NULL, 0 }
     };
@@ -359,60 +280,46 @@ int main(void)
     memset(&info, 0, sizeof info);
     info.port = PORT;
     info.protocols = protocols;
-    info.user = state;
+    info.user = &state;
 
     lwsContext = lws_create_context(&info);
-    if (!lwsContext) {
+    if (!lwsContext)
+    {
         fprintf(stderr, "Błąd: nie udało się utworzyć kontekstu WebSocket\n");
         uvc_close(devHandler);
         uvc_unref_device(device);
         uvc_exit(camContext);
-        motion_detector_destroy(state->motionDetector);
-        free(state);
+        motion_detector_destroy(state.motionDetector);
         return 1;
     }
 
     printf("Serwer WebSocket działa na ws://<IP>:%d\n", PORT);
-    // printf("Preview FPS: %d, Motion check FPS: %d, JSON interval: %dms (%.2f FPS)\n", 
-    //        PREVIEW_FPS, MOTION_CHECK_FPS, JSON_SEND_INTERVAL_MS, 
-    //        1000.0 / JSON_SEND_INTERVAL_MS);
-    
     while (!stopRequested)
     {
-        if (state->connectionEstablished && !isStreaming)
+        // Start streaming
+        if (state.connectionEstablished && !isStreaming)
         {
-            res = uvc_start_streaming(devHandler, &streamCtrl, callbackUVC, state, 0);
+            // uvc_device_handle_t *devh, uvc_stream_ctrl_t *ctrl, uvc_frame_callback_t *cb,void *user_ptr, uint8_t flags
+            res = uvc_start_streaming(devHandler, &streamCtrl, callbackUVC, &state, 0);
             if (res < 0)
             {
-                uvc_perror(res, "start_streaming");
-            } else {
+                uvc_perror(res, "streaming error");
+            } else
+            {
                 printf("Stream uruchomiony\n");
                 isStreaming = true;
             }
         }
         
-        if (!state->connectionEstablished && isStreaming)
-        {
+        // Stop isStreaming gdy klient się rozłączy
+        if (!state.connectionEstablished && isStreaming) {
             printf("Rozłączono – zatrzymuję stream\n");
             uvc_stop_streaming(devHandler);
             isStreaming = false;
-            state->hasPrevFrame = false;
         }
-        
-        // Adaptacyjny timeout
-        int timeout;
-        if (state->connectionEstablished && state->needsSend)
-        {
-            timeout = 100;  // Dszybki tiemout
-        } else if (state->connectionEstablished)
-        {
-            timeout = 100;  // Normalny tryb
-        } else {
-            timeout = 100;  // Brak połączenia - oszczędzaj CPU
-        }
+        // Obsługa WebSocket
+        lws_service(lwsContext, FPS_INTERVAL);
         usleep(30000);
-        lws_service(lwsContext, 100);
-
     }
 
     // Cleanup
@@ -420,14 +327,11 @@ int main(void)
     {
         uvc_stop_streaming(devHandler);
     }
-    
-    motion_detector_destroy(state->motionDetector);
     uvc_close(devHandler);
     uvc_unref_device(device);
     uvc_exit(camContext);
     lws_context_destroy(lwsContext);
-    
-    free(state);
+    motion_detector_destroy(state.motionDetector);
 
     if (logFile)
     {
