@@ -6,7 +6,7 @@ LDFLAGS =
 LIBS = `pkg-config --libs opencv4 libuvc libwebsockets` -lpthread -lm
 
 TARGET = cam_service
-C_SOURCES = motion_mix.c ../common.c
+C_SOURCES = cam_service_motion.c ../common.c
 CPP_SOURCES = motion_detector.cpp
 C_OBJECTS = $(C_SOURCES:.c=.o)
 CPP_OBJECTS = $(CPP_SOURCES:.cpp=.o)
