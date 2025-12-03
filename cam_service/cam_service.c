@@ -10,7 +10,7 @@
 #define PORT 2138
 #define MAX_FRAME_SIZE (2 * 1024 * 1024)
 #define FPS 30
-#define STREAM_FPS 10  // Docelowy FPS dla WebSocket
+#define STREAM_FPS 15  // Docelowy FPS dla WebSocket
 #define LWS_TIMEOUT_MS (1000 / STREAM_FPS)
 #define FPS_INTERVAL (1000 / STREAM_FPS)
 
@@ -240,6 +240,7 @@ int main(void)
         }
         // Obsługa WebSocket
         lws_service(lwsContext, LWS_TIMEOUT_MS);
+        usleep(30000);
     }
 
     // Cleanup
