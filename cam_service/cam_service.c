@@ -55,6 +55,7 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
     memcpy(state->frameBuffer, frame->data, frame->data_bytes);
     state->frameSize = frame->data_bytes;
     state->hasNewFrame = 1;
+    state->lastSentTime = timeNow;
 }
 
 static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
@@ -110,7 +111,6 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
             lws_write(wsi, buf + LWS_PRE, state->frameSize, LWS_WRITE_BINARY);
             free(buf);
             state->hasNewFrame = 0;
-            state->lastSentTime = timeNow;
         }
         // Poproś o kolejne wywołanie
         lws_callback_on_writable(wsi);
@@ -180,7 +180,7 @@ int main(void)
     }
 
     res = uvc_get_stream_ctrl_format_size(devHandler, &streamCtrl, UVC_FRAME_FORMAT_MJPEG, 
-                                          640, 480, FPS);
+                                          640, 480, 0);
     if (res < 0)
     {
         uvc_perror(res, "get_stream_ctrl");
