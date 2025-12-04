@@ -11,31 +11,32 @@
 #define PORT 2138
 #define MAX_FRAME_SIZE (2 * 1024 * 1024)
 #define FPS 30
-#define STREAM_FPS 15  // Docelowy FPS dla WebSocket
+#define STREAM_FPS 15
 #define FPS_INTERVAL (1000 / STREAM_FPS)
 #define JSON_INTERVAL_MS 10000
 #define LWS_TIMEOUT 100
 
-typedef struct {
-    // WebSocket
-    volatile bool connectionEstablished;
+// Globalne zmienne dla kamery
+static uvc_device_handle_t *g_devHandler = NULL;
+static uvc_stream_ctrl_t g_streamCtrl;
+static volatile bool g_isStreaming = false;
+static pthread_mutex_t g_streamMutex = PTHREAD_MUTEX_INITIALIZER;
 
+typedef struct {
+    volatile bool connectionEstablished;
+    struct lws *wsi;  // Dodany wskaźnik do wsi
     struct timespec lastSentTime;
     struct timespec lastJsonSentTime;
-    struct timespec lastFameSentTime;
-
-    // Kamera
+    struct timespec lastFrameSentTime;
     unsigned char frameBuffer[MAX_FRAME_SIZE];
     size_t frameSize;
     volatile int hasNewFrame;
     volatile int frameCounter;
     volatile bool motionDetectedFlag;
-
     void* motionDetector;
     pthread_mutex_t mutex;
 } AppState;
 
-// Pomocnicza funkcja do liczenia różnicy czasu w ms
 static long long timespec_diff_ms(struct timespec *start, struct timespec *end)
 {
     return (end->tv_sec - start->tv_sec) * 1000LL + 
@@ -46,11 +47,11 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
 {
     AppState *state = (AppState*)ptr;
     
-    if (!state->connectionEstablished)
+    if (!state->connectionEstablished || !state->wsi)
     {
-        return;  // Nie przetwarzaj ramek gdy nikt nie słucha
+        return;
     }
-    // Podstawowe sprawdzenia
+    
     if (!frame || frame->data_bytes == 0 || frame->data_bytes > MAX_FRAME_SIZE)
     {
         return;
@@ -66,10 +67,11 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
 
     unsigned char prevFrameBuffer[MAX_FRAME_SIZE];
     size_t prevFrameSize;
+    
+    pthread_mutex_lock(&state->mutex);
     memcpy(prevFrameBuffer, state->frameBuffer, state->frameSize);
     prevFrameSize = state->frameSize;
-
-    pthread_mutex_lock(&state->mutex);
+    
     memcpy(state->frameBuffer, frame->data, frame->data_bytes);
     state->frameSize = frame->data_bytes;
     state->hasNewFrame = 1;
@@ -81,6 +83,7 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
     }
     pthread_mutex_unlock(&state->mutex);
 
+    // Detekcja ruchu co drugą klatkę
     if(prevFrameSize > 0 && state->frameCounter % 2 == 0)
     {
         bool motionNow = motion_detector_detect(
@@ -95,6 +98,77 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
             pthread_mutex_unlock(&state->mutex);
         }
     }
+
+    // Sprawdź czy czas na wysłanie JSON lub ramki
+    long long elapsedJsonTime = timespec_diff_ms(&state->lastJsonSentTime, &timeNow);
+    long long elapsedFrameTime = timespec_diff_ms(&state->lastFrameSentTime, &timeNow);
+    
+    printf("[callbackUVC] elapsedJsonTime = %llu, JSON_INTERVAL_MS=%u \n", elapsedJsonTime, JSON_INTERVAL_MS);
+    printf("[callbackUVC] elapsedFrameTime = %llu, FPS_INTERVAL=%u \n", elapsedFrameTime, FPS_INTERVAL);
+    // Jeśli minął odpowiedni czas, oznacz wsi jako writable
+    if (elapsedJsonTime >= JSON_INTERVAL_MS || elapsedFrameTime >= FPS_INTERVAL)
+    {
+        printf("[callbackUVC] DO NAW lws_callback_on_writable(state->wsi) \n");
+        pthread_mutex_lock(&state->mutex);
+        lws_callback_on_writable(state->wsi);
+        struct lws_context *context = lws_get_context(state->wsi);
+        lws_cancel_service(context);
+        // lws_service(context, 50);
+        pthread_mutex_unlock(&state->mutex);
+    }
+}
+
+// Funkcja do startowania streamu
+static bool startCameraStream(AppState *state)
+{
+    pthread_mutex_lock(&g_streamMutex);
+    
+    if (g_isStreaming)
+    {
+        pthread_mutex_unlock(&g_streamMutex);
+        return true;
+    }
+    
+    if (!g_devHandler)
+    {
+        fprintf(stderr, "[CAM] Błąd: brak uchwytu kamery\n");
+        pthread_mutex_unlock(&g_streamMutex);
+        return false;
+    }
+    
+    uvc_error_t res = uvc_start_streaming(g_devHandler, &g_streamCtrl, callbackUVC, state, 0);
+    if (res < 0)
+    {
+        uvc_perror(res, "[CAM] Błąd uruchomienia streamu");
+        pthread_mutex_unlock(&g_streamMutex);
+        return false;
+    }
+    
+    g_isStreaming = true;
+    fprintf(stderr, "[CAM] Stream uruchomiony\n");
+    pthread_mutex_unlock(&g_streamMutex);
+    return true;
+}
+
+// Funkcja do zatrzymywania streamu
+static void stopCameraStream(void)
+{
+    pthread_mutex_lock(&g_streamMutex);
+    
+    if (!g_isStreaming)
+    {
+        pthread_mutex_unlock(&g_streamMutex);
+        return;
+    }
+    
+    if (g_devHandler)
+    {
+        uvc_stop_streaming(g_devHandler);
+        fprintf(stderr, "[CAM] Stream zatrzymany\n");
+    }
+    
+    g_isStreaming = false;
+    pthread_mutex_unlock(&g_streamMutex);
 }
 
 static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
@@ -109,58 +183,72 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
     {
         return -1;
     }
+    
     switch (reason)
     {
     case LWS_CALLBACK_ESTABLISHED:
     {
         fprintf(stderr, "[WS] Klient połączony\n");
-        lwsl_user("Nowe połączenie WebSocket\n");
-        pthread_mutex_lock(&state->mutex);  // Jeśli używasz
-        state->connectionEstablished = true;
         
-        // RESET wszystkiego na czysto
+        pthread_mutex_lock(&state->mutex);
+        state->connectionEstablished = true;
+        state->wsi = wsi;  // Zapisz wskaźnik do wsi
         state->hasNewFrame = 0;
         state->frameSize = 0;
         state->frameCounter = 0;
         state->motionDetectedFlag = false;
-        // Zresetuj czas ostatniego wysłania
+        
         struct timespec timeNow;
         clock_gettime(CLOCK_MONOTONIC, &timeNow);
         state->lastSentTime = timeNow;
         state->lastJsonSentTime = timeNow;
-        state->lastFameSentTime = timeNow;
+        state->lastFrameSentTime = timeNow;
+        memset(state->frameBuffer, 0, MAX_FRAME_SIZE);
         pthread_mutex_unlock(&state->mutex);
-        lws_callback_on_writable(wsi);
+        
+        // Uruchom kamerę
+        startCameraStream(state);
         break;
     }
+    
     case LWS_CALLBACK_SERVER_WRITEABLE:
     {
-                pthread_mutex_lock(&state->mutex);
+        struct timespec timeNow;
+        clock_gettime(CLOCK_MONOTONIC, &timeNow);
+        
+        pthread_mutex_lock(&state->mutex);
+        
+        // Sprawdź czy jest ramka do wysłania
         if (!state->hasNewFrame || state->frameSize == 0)
         {
+            printf("[WEBSOCKET] tate->hasNewFrame=%d\n", state->hasNewFrame);
             pthread_mutex_unlock(&state->mutex);
-            // Brak nowej ramki - poproś o kolejne wywołanie
-            lws_callback_on_writable(wsi);
             break;
         }
         
-        // Sprawdź czy minął wystarczający czas od ostatniego wysłania
-        struct timespec timeNow;
-        clock_gettime(CLOCK_MONOTONIC, &timeNow);
-        long long elapesedJsonTime = timespec_diff_ms(&state->lastJsonSentTime, &timeNow);
-        long long elapsedTime = timespec_diff_ms(&state->lastSentTime, &timeNow);
-        if(elapesedJsonTime > JSON_INTERVAL_MS)
+        // Oblicz czasy
+        long long elapsedJsonTime = timespec_diff_ms(&state->lastJsonSentTime, &timeNow);
+        long long elapsedFrameTime = timespec_diff_ms(&state->lastFrameSentTime, &timeNow);
+        
+        printf("[WEBSOCKET] hasFrame=%d, frameSize=%zu, elapsedJson=%lld, elapsedFrame=%lld\n",
+               state->hasNewFrame, state->frameSize, elapsedJsonTime, elapsedFrameTime);
+        
+        // Priorytet 1: Wyślij JSON z informacją o ruchu (co 10s)
+        if(elapsedJsonTime >= JSON_INTERVAL_MS)
         {
             bool motion = state->motionDetectedFlag;
-            // Zaktualizuj state
             state->motionDetectedFlag = false;
             state->lastJsonSentTime = timeNow;
             pthread_mutex_unlock(&state->mutex);
+            
+            printf("[WEBSOCKET] Wysyłam JSON: motion=%d\n", motion);
+            
             char jsonBuffer[512];
             snprintf(jsonBuffer, sizeof(jsonBuffer),
                 "{\"motion\":%s,\"timestamp\":%ld}",
                 motion ? "true" : "false",
                 timeNow.tv_sec);
+            
             size_t jsonLen = strlen(jsonBuffer);
             unsigned char *buf = (unsigned char*)malloc(LWS_PRE + jsonLen);
             if (buf)
@@ -168,58 +256,74 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
                 memcpy(buf + LWS_PRE, jsonBuffer, jsonLen);
                 lws_write(wsi, buf + LWS_PRE, jsonLen, LWS_WRITE_TEXT);
                 free(buf);
-                lws_callback_on_writable(wsi);
-                break;
             }
-        } else if(elapsedTime < FPS_INTERVAL)
-        {
-            // Za wcześnie - pomiń tę ramkę
-            // Poproś o kolejne wywołanie w następnym cyklu
-            pthread_mutex_unlock(&state->mutex);
-            lws_callback_on_writable(wsi);
+            
+            // Po wysłaniu, pozwól callbackUVC zdecydować o kolejnym writable
             break;
-        } else
+        }
+         printf("[WEBSOCKET] elapsedFrameTime = %llu, FPS_INTERVAL=%u \n", elapsedFrameTime, FPS_INTERVAL);
+        // Priorytet 2: Wyślij ramkę video (co ~66ms dla 15 FPS)
+        if(elapsedFrameTime >= FPS_INTERVAL)
         {
-            unsigned char *buf = (unsigned char*)malloc(LWS_PRE + state->frameSize);
+            printf("[WEBSOCKET] Wysyłam ramkę: size=%zu\n", state->frameSize);
+            
+            size_t frameSize = state->frameSize;
+            unsigned char *buf = (unsigned char*)malloc(LWS_PRE + frameSize);
+            
             if (buf)
             {
-                pthread_mutex_unlock(&state->mutex);
-                memcpy(buf + LWS_PRE, state->frameBuffer, state->frameSize);
-                pthread_mutex_unlock(&state->mutex);
-
-                lws_write(wsi, buf + LWS_PRE, state->frameSize, LWS_WRITE_BINARY);
-                free(buf);
+                // Kopiuj POD mutexem
+                memcpy(buf + LWS_PRE, state->frameBuffer, frameSize);
+                
+                // Aktualizuj state POD mutexem
                 state->hasNewFrame = 0;
+                state->lastFrameSentTime = timeNow;
+                
+                pthread_mutex_unlock(&state->mutex);
+                
+                // Wyślij POZA mutexem
+                int written = lws_write(wsi, buf + LWS_PRE, frameSize, LWS_WRITE_BINARY);
+                printf("[callbackWs] Wysłano %d bajtów\n", written);
+                free(buf);
             }
-            state->lastFameSentTime = timeNow;
-            pthread_mutex_unlock(&state->mutex);
+            else
+            {
+                pthread_mutex_unlock(&state->mutex);
+            }
+            
+            // Po wysłaniu, pozwól callbackUVC zdecydować o kolejnym writable
+            break;
         }
-
-        lws_callback_on_writable(wsi);
+        
+        // Jeśli żaden warunek nie został spełniony
+        printf("[callbackWs] Za wcześnie na wysłanie (json=%lld, frame=%lld)\n",
+               elapsedJsonTime, elapsedFrameTime);
+        pthread_mutex_unlock(&state->mutex);
         break;
     }
+    
     case LWS_CALLBACK_CLOSED:
     {
         fprintf(stderr, "[WS] Klient rozłączony\n");
-        lwsl_user("Połączenie WebSocket zakończone\n");
 
-        pthread_mutex_lock(&state->mutex);  // Jeśli używasz mutex
+        pthread_mutex_lock(&state->mutex);
         struct timespec timeNow;
         clock_gettime(CLOCK_MONOTONIC, &timeNow);
         state->connectionEstablished = false;
+        state->wsi = NULL;  // Wyczyść wskaźnik do wsi
         state->hasNewFrame = 0;
         state->frameSize = 0;
         state->frameCounter = 0;
         state->motionDetectedFlag = false;
-        
-        //WAŻNE: Reset timerów
         state->lastSentTime = timeNow;
         state->lastJsonSentTime = timeNow;
-        state->lastFameSentTime = timeNow;
-        pthread_mutex_unlock(&state->mutex);  // Jeśli używasz mutex
+        state->lastFrameSentTime = timeNow;
+        pthread_mutex_unlock(&state->mutex);
+        
+        // Zatrzymaj kamerę
+        stopCameraStream();
         break;
     }
-
         
     default:
         break;
@@ -234,9 +338,9 @@ int main(void)
     signal(SIGSEGV, handleSignal);
     signal(SIGABRT, handleSignal);
 
-    FILE *logFile = fopen("/var/log/camService.log", "a");
-    setvbuf(logFile, NULL, _IOLBF, 0);
-    stderr = logFile;
+    // FILE *logFile = fopen("/var/log/camService.log", "a");
+    // setvbuf(logFile, NULL, _IOLBF, 0);
+    // stderr = logFile;
 
     MotionParams motionParams = {
         .motionThreshold = 20,
@@ -249,10 +353,11 @@ int main(void)
 
     AppState state = {
         .connectionEstablished = false,
+        .wsi = NULL,
         .lastSentTime = {0, 0},
         .lastJsonSentTime = timeNow,
-        .lastFameSentTime = timeNow,
-        .frameBuffer = {0},              // opcjonalne, ale usuwa warning
+        .lastFrameSentTime = timeNow,
+        .frameBuffer = {0},
         .frameSize = 0,
         .hasNewFrame = 0,
         .frameCounter = 0,
@@ -269,12 +374,9 @@ int main(void)
 
     uvc_context_t *camContext;
     uvc_device_t *device;
-    uvc_device_handle_t *devHandler;
-    uvc_stream_ctrl_t streamCtrl;
     uvc_error_t res;
-    bool isStreaming = false;
 
-    // --- Inicjalizacja UVC ---
+    // Inicjalizacja UVC
     res = uvc_init(&camContext, NULL);
     if (res < 0)
     {
@@ -292,7 +394,7 @@ int main(void)
         return 1;
     }
 
-    res = uvc_open(device, &devHandler);
+    res = uvc_open(device, &g_devHandler);
     if (res < 0)
     {
         uvc_perror(res, "uvc_open");
@@ -302,22 +404,21 @@ int main(void)
         return 1;
     }
 
-    res = uvc_get_stream_ctrl_format_size(devHandler, &streamCtrl, UVC_FRAME_FORMAT_MJPEG, 
-                                          640, 480, 0);
+    res = uvc_get_stream_ctrl_format_size(g_devHandler, &g_streamCtrl, 
+                                          UVC_FRAME_FORMAT_MJPEG, 640, 480, 0);
     if (res < 0)
     {
         uvc_perror(res, "get_stream_ctrl");
-        uvc_close(devHandler);
+        uvc_close(g_devHandler);
         uvc_unref_device(device);
         uvc_exit(camContext);
         motion_detector_destroy(state.motionDetector);
         return 1;
     }
 
-    // --- WebSocket ---
+    // WebSocket
     struct lws_protocols protocols[] =
     {   
-        // const char *name, lws_callback_function *callback , size_t per_session_data_size, size_t rx_buffer_size, unsigned int id , void *user, size_t tx_packet_size
         { "cam-protocol", callbackWs, 0, MAX_FRAME_SIZE, 0, NULL, 0},
         { NULL, NULL, 0, 0, 0, NULL, 0 }
     };
@@ -332,7 +433,7 @@ int main(void)
     if (!lwsContext)
     {
         fprintf(stderr, "Błąd: nie udało się utworzyć kontekstu WebSocket\n");
-        uvc_close(devHandler);
+        uvc_close(g_devHandler);
         uvc_unref_device(device);
         uvc_exit(camContext);
         motion_detector_destroy(state.motionDetector);
@@ -340,49 +441,28 @@ int main(void)
     }
 
     printf("Serwer WebSocket działa na ws://<IP>:%d\n", PORT);
+    
+    // Główna pętla - tylko obsługa WebSocket
     while (!stopRequested)
     {
-        // Start streaming
-        if (state.connectionEstablished && !isStreaming)
-        {
-            // uvc_device_handle_t *devh, uvc_stream_ctrl_t *ctrl, uvc_frame_callback_t *cb,void *user_ptr, uint8_t flags
-            res = uvc_start_streaming(devHandler, &streamCtrl, callbackUVC, &state, 0);
-            if (res < 0)
-            {
-                uvc_perror(res, "streaming error");
-            } else
-            {
-                printf("Stream uruchomiony\n");
-                isStreaming = true;
-            }
-        }
-        
-        // Stop isStreaming gdy klient się rozłączy
-        if (!state.connectionEstablished && isStreaming) {
-            printf("Rozłączono – zatrzymuję stream\n");
-            uvc_stop_streaming(devHandler);
-            isStreaming = false;
-        }
-        // Obsługa WebSocket
-        lws_service(lwsContext, LWS_TIMEOUT);
-        usleep(30000);
+        lws_service(lwsContext, 30);
+        usleep(60000);
     }
 
     // Cleanup
-    if (isStreaming)
-    {
-        uvc_stop_streaming(devHandler);
-    }
-    uvc_close(devHandler);
+    stopCameraStream();
+    uvc_close(g_devHandler);
     uvc_unref_device(device);
     uvc_exit(camContext);
     lws_context_destroy(lwsContext);
     motion_detector_destroy(state.motionDetector);
     pthread_mutex_destroy(&state.mutex);
-    if (logFile)
-    {
-        fclose(logFile);
-    }
+    pthread_mutex_destroy(&g_streamMutex);
+    
+    // if (logFile)
+    // {
+    //     fclose(logFile);
+    // }
 
     return 0;
 }
