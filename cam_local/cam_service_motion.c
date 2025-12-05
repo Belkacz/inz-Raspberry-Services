@@ -11,8 +11,9 @@
 #define PORT 2138
 #define MAX_FRAME_SIZE (2 * 1024 * 1024)
 #define FPS 30
-#define STREAM_FPS 15
+#define STREAM_FPS 5
 #define FPS_INTERVAL (1000 / STREAM_FPS)
+#define ANALYSE_INTERVAL (1000 / 15)
 #define JSON_INTERVAL_MS 10000
 #define LWS_TIMEOUT 100
 
@@ -60,8 +61,10 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
     struct timespec timeNow;
     clock_gettime(CLOCK_MONOTONIC, &timeNow);
     long long elapsedTime = timespec_diff_ms(&state->lastSentTime, &timeNow);
-    if (elapsedTime < FPS_INTERVAL)
+    if ((elapsedTime < FPS_INTERVAL) || (elapsedTime < ANALYSE_INTERVAL))
     {
+        // printf("[callbackUVC]  escape from frame anaylyse \n");
+        pthread_mutex_unlock(&state->mutex);
         return;
     }
 
@@ -84,31 +87,31 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
     pthread_mutex_unlock(&state->mutex);
 
     // Detekcja ruchu co drugą klatkę
-    if(prevFrameSize > 0 && state->frameCounter % 2 == 0)
+    // if(prevFrameSize > 0 && state->frameCounter % 2 == 0)
+    // {
+    bool motionNow = motion_detector_detect(
+        state->motionDetector,
+        state->frameBuffer, state->frameSize,
+        prevFrameBuffer, prevFrameSize
+    );
+    if(motionNow)
     {
-        bool motionNow = motion_detector_detect(
-            state->motionDetector,
-            state->frameBuffer, state->frameSize,
-            prevFrameBuffer, prevFrameSize
-        );
-        if(motionNow)
-        {
-            pthread_mutex_lock(&state->mutex);
-            state->motionDetectedFlag = true;
-            pthread_mutex_unlock(&state->mutex);
-        }
+        pthread_mutex_lock(&state->mutex);
+        state->motionDetectedFlag = true;
+        pthread_mutex_unlock(&state->mutex);
     }
+    // }
 
     // Sprawdź czy czas na wysłanie JSON lub ramki
     long long elapsedJsonTime = timespec_diff_ms(&state->lastJsonSentTime, &timeNow);
     long long elapsedFrameTime = timespec_diff_ms(&state->lastFrameSentTime, &timeNow);
     
-    printf("[callbackUVC] elapsedJsonTime = %llu, JSON_INTERVAL_MS=%u \n", elapsedJsonTime, JSON_INTERVAL_MS);
-    printf("[callbackUVC] elapsedFrameTime = %llu, FPS_INTERVAL=%u \n", elapsedFrameTime, FPS_INTERVAL);
+    // printf("[callbackUVC] elapsedJsonTime = %llu, JSON_INTERVAL_MS=%u \n", elapsedJsonTime, JSON_INTERVAL_MS);
+    // printf("[callbackUVC] elapsedFrameTime = %llu, FPS_INTERVAL=%u \n", elapsedFrameTime, FPS_INTERVAL);
     // Jeśli minął odpowiedni czas, oznacz wsi jako writable
     if (elapsedJsonTime >= JSON_INTERVAL_MS || elapsedFrameTime >= FPS_INTERVAL)
     {
-        printf("[callbackUVC] DO NAW lws_callback_on_writable(state->wsi) \n");
+        // printf("[callbackUVC] DO NAW lws_callback_on_writable(state->wsi) \n");
         pthread_mutex_lock(&state->mutex);
         lws_callback_on_writable(state->wsi);
         struct lws_context *context = lws_get_context(state->wsi);
@@ -221,7 +224,7 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
         // Sprawdź czy jest ramka do wysłania
         if (!state->hasNewFrame || state->frameSize == 0)
         {
-            printf("[WEBSOCKET] tate->hasNewFrame=%d\n", state->hasNewFrame);
+            // printf("[WEBSOCKET] tate->hasNewFrame=%d\n", state->hasNewFrame);
             pthread_mutex_unlock(&state->mutex);
             break;
         }
@@ -230,8 +233,8 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
         long long elapsedJsonTime = timespec_diff_ms(&state->lastJsonSentTime, &timeNow);
         long long elapsedFrameTime = timespec_diff_ms(&state->lastFrameSentTime, &timeNow);
         
-        printf("[WEBSOCKET] hasFrame=%d, frameSize=%zu, elapsedJson=%lld, elapsedFrame=%lld\n",
-               state->hasNewFrame, state->frameSize, elapsedJsonTime, elapsedFrameTime);
+        // printf("[WEBSOCKET] hasFrame=%d, frameSize=%zu, elapsedJson=%lld, elapsedFrame=%lld\n",
+        //        state->hasNewFrame, state->frameSize, elapsedJsonTime, elapsedFrameTime);
         
         // Priorytet 1: Wyślij JSON z informacją o ruchu (co 10s)
         if(elapsedJsonTime >= JSON_INTERVAL_MS)
@@ -241,7 +244,7 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
             state->lastJsonSentTime = timeNow;
             pthread_mutex_unlock(&state->mutex);
             
-            printf("[WEBSOCKET] Wysyłam JSON: motion=%d\n", motion);
+            // printf("[WEBSOCKET] Wysyłam JSON: motion=%d\n", motion);
             
             char jsonBuffer[512];
             snprintf(jsonBuffer, sizeof(jsonBuffer),
@@ -261,11 +264,11 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
             // Po wysłaniu, pozwól callbackUVC zdecydować o kolejnym writable
             break;
         }
-         printf("[WEBSOCKET] elapsedFrameTime = %llu, FPS_INTERVAL=%u \n", elapsedFrameTime, FPS_INTERVAL);
+        //  printf("[WEBSOCKET] elapsedFrameTime = %llu, FPS_INTERVAL=%u \n", elapsedFrameTime, FPS_INTERVAL);
         // Priorytet 2: Wyślij ramkę video (co ~66ms dla 15 FPS)
         if(elapsedFrameTime >= FPS_INTERVAL)
         {
-            printf("[WEBSOCKET] Wysyłam ramkę: size=%zu\n", state->frameSize);
+            // printf("[WEBSOCKET] Wysyłam ramkę: size=%zu\n", state->frameSize);
             
             size_t frameSize = state->frameSize;
             unsigned char *buf = (unsigned char*)malloc(LWS_PRE + frameSize);
@@ -283,7 +286,7 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
                 
                 // Wyślij POZA mutexem
                 int written = lws_write(wsi, buf + LWS_PRE, frameSize, LWS_WRITE_BINARY);
-                printf("[callbackWs] Wysłano %d bajtów\n", written);
+                // printf("[callbackWs] Wysłano %d bajtów\n", written);
                 free(buf);
             }
             else
@@ -296,8 +299,8 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
         }
         
         // Jeśli żaden warunek nie został spełniony
-        printf("[callbackWs] Za wcześnie na wysłanie (json=%lld, frame=%lld)\n",
-               elapsedJsonTime, elapsedFrameTime);
+        // printf("[callbackWs] Za wcześnie na wysłanie (json=%lld, frame=%lld)\n",
+        //        elapsedJsonTime, elapsedFrameTime);
         pthread_mutex_unlock(&state->mutex);
         break;
     }
@@ -338,9 +341,9 @@ int main(void)
     signal(SIGSEGV, handleSignal);
     signal(SIGABRT, handleSignal);
 
-    // FILE *logFile = fopen("/var/log/camService.log", "a");
-    // setvbuf(logFile, NULL, _IOLBF, 0);
-    // stderr = logFile;
+    FILE *logFile = fopen("/var/log/camService.log", "a");
+    setvbuf(logFile, NULL, _IOLBF, 0);
+    stderr = logFile;
 
     MotionParams motionParams = {
         .motionThreshold = 20,
@@ -459,10 +462,10 @@ int main(void)
     pthread_mutex_destroy(&state.mutex);
     pthread_mutex_destroy(&g_streamMutex);
     
-    // if (logFile)
-    // {
-    //     fclose(logFile);
-    // }
+    if (logFile)
+    {
+        fclose(logFile);
+    }
 
     return 0;
 }
