@@ -122,6 +122,7 @@ static int callbackLWS(struct lws *wsi, enum lws_callback_reasons reason,
     AppState *state = (AppState *)lws_context_user(lws_get_context(wsi));
     switch (reason) {
         case LWS_CALLBACK_ESTABLISHED:
+        {
             lwsl_user("Nowe połączenie WebSocket\n");
             pthread_mutex_lock(&state->mutex);
             state->connectionEstablished = true;
@@ -130,7 +131,7 @@ static int callbackLWS(struct lws *wsi, enum lws_callback_reasons reason,
             lws_callback_on_writable(state->wsi);
             pthread_mutex_unlock(&state->mutex);
             break;
-
+        }
         case LWS_CALLBACK_SERVER_WRITEABLE:
         {
             char message[MAX_PAYLOAD] = "\0";
@@ -158,12 +159,14 @@ static int callbackLWS(struct lws *wsi, enum lws_callback_reasons reason,
         }
 
         case LWS_CALLBACK_CLOSED:
+        {
             lwsl_user("Połączenie zamknięte\n");
             pthread_mutex_lock(&state->mutex);
             state->wsi = NULL;
             state->connectionEstablished = false;
             pthread_mutex_unlock(&state->mutex);
             break;
+        }
 
         default:
             break;

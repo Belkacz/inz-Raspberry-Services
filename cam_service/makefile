@@ -1,19 +1,28 @@
-CC = gcc
-CFLAGS = -Wall -Wextra -O2 -I.. -Ilibuvc/include
-LDFLAGS = -Llibuvc/lib
-LIBS = -luvc -lwebsockets -lpthread
+CC = g++
+CXX = g++
+CFLAGS = -Wall -Wextra -O2 -I..
+CXXFLAGS = -Wall -Wextra -O2 -std=c++11 -I.. `pkg-config --cflags opencv4`
+LDFLAGS = 
+LIBS = `pkg-config --libs opencv4 libuvc libwebsockets` -lpthread -lm
 
 TARGET = cam_service
-SOURCES = cam_service.c ../common.c
-OBJECTS = $(SOURCES:.c=.o)
+C_SOURCES = cam_service_motion.c ../common.c
+CPP_SOURCES = motion_detector.cpp
+C_OBJECTS = $(C_SOURCES:.c=.o)
+CPP_OBJECTS = $(CPP_SOURCES:.cpp=.o)
+OBJECTS = $(C_OBJECTS) $(CPP_OBJECTS)
 
 all: $(TARGET)
 
 $(TARGET): $(OBJECTS)
-	$(CC) $(OBJECTS) $(LDFLAGS) $(LIBS) -o $(TARGET)
+	$(CXX) $(OBJECTS) $(LDFLAGS) $(LIBS) -o $(TARGET)
 
+# Kompiluj .c przez g++ (nie gcc!)
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CXX) $(CFLAGS) -c $< -o $@
+
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 clean:
 	rm -f $(OBJECTS) $(TARGET)
