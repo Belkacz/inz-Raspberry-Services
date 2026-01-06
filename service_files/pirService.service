@@ -1,0 +1,17 @@
+[Unit]
+Description=WebSocket Thread Pir Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/pir_service   
+Restart=always
+RestartSec=5
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=ThreadPirService
+
+[Install]
+WantedBy=multi-user.target
+~
+~

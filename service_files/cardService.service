@@ -1,0 +1,16 @@
+[Unit]
+Description=WebSocket Thread Card Service
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/card_service   
+Restart=always
+RestartSec=5
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=ThreadCardService
+
+[Install]
+WantedBy=multi-user.target
+
