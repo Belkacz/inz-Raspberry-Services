@@ -1,9 +1,9 @@
 CC = g++
 CXX = g++
 CFLAGS = -Wall -Wextra -O2 -I..
-CXXFLAGS = -Wall -Wextra -O2 -std=c++11 -I.. `pkg-config --cflags opencv4`
+CXXFLAGS = -Wall -Wextra -O2 -std=c++17 -I.. `pkg-config --cflags opencv4`
 LDFLAGS = 
-LIBS = `pkg-config --libs opencv4 libuvc libwebsockets` -lpthread -lm
+LIBS = `pkg-config --libs opencv4 libuvc libwebsockets` -lpthread
 
 TARGET = cam_service
 C_SOURCES = cam_service_motion.c ../common.c
