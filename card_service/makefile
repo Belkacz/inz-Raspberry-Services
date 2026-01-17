@@ -3,7 +3,7 @@ CFLAGS = -Wall -Wextra -O2 -I..
 LIBS = -lwebsockets -lpthread
 
 TARGET = card_service
-SOURCES = card_service.c ../common.c
+SOURCES = card_service.c card_service_fn.c ../common.c
 OBJECTS = $(SOURCES:.c=.o)
 
 all: $(TARGET)

@@ -11,106 +11,19 @@
 #include <libwebsockets.h>
 #include <fcntl.h>
 #include <stdbool.h>
-#include <pthread.h>
 #include <errno.h>
 // #include <LCD1602.h
 #include <signal.h>
 #include <time.h>
 #include <sys/time.h>
 #include "common.h"
+#include "card_service_fn.h"
 
 #define MAX_PAYLOAD 1024
 #define CARD_INPUT "/dev/hidraw0"
 #define CARD_NUMBER 24
 #define MAX_CARD_LEN 32
 #define PORT 2139
-
-/* Wspólne zmienne */
-typedef struct {
-    // WebSocket
-    struct lws *wsi;
-    bool connectionEstablished;
-    bool requestSend;
-    
-    // Karty
-    char **cardList;
-    int currentCardListSize;
-    char payload[MAX_PAYLOAD];
-    
-    // Synchronizacja
-    pthread_mutex_t mutex;
-    pthread_cond_t payloadCond;
-} AppState;
-
-int findCardInList(const char *card, const char** cardList, int cardListLen)
-{
-    for (int i = 0; i < cardListLen; i++)
-        if (strcmp(cardList[i], card) == 0)
-            return i;
-    return -1;
-}
-int checkEmptySlots(char** cardList, int cardListLen)
-{
-    int emptyCount = 0;
-    for (int i = 0; i < cardListLen; i++)
-    {
-        if(cardList[i][0] == '\0') // pusty string
-            emptyCount++;
-    }
-    return emptyCount;
-}
-
-int addCardToList(const char *card, char*** cardList, int cardListLen)
-{
-    for (int i = 0; i < cardListLen; i++)
-    {
-        if ((*cardList)[i][0] == '\0')
-        {
-            size_t len = strlen(card);
-            memcpy((*cardList)[i], card, len);
-            (*cardList)[i][len] = '\0';
-            return 1;
-        }
-    }
-    return -1;
-}
-
-int removeCardFromList(int cardIdx, char ***cardList, int cardListLen)
-{
-    if (cardIdx < 0 || cardIdx >= cardListLen)
-        return -1;
-
-    (*cardList)[cardIdx][0] = '\0';
-    for (int i = cardIdx; i < cardListLen - 1; i++)
-    {
-        strcpy((*cardList)[i], (*cardList)[i + 1]);
-        (*cardList)[i + 1][0] = '\0';
-    }
-
-    return 0;
-}
-
-void buildPayloud(AppState *state)
-{
-    state->payload[0] = '\0';
-    strncat(state->payload, "{", MAX_PAYLOAD - 1);
-
-    int cardCount = 0;
-    for (int i = 0; i < state->currentCardListSize; i++)
-    {
-        if (state->cardList[i][0] != '\0')  
-        {
-            char tmpCardStr[24]; // tymczasowy bufor dla jednej pary // 3473788805 to 9 + 6
-            snprintf(tmpCardStr, sizeof(tmpCardStr),"\"card%d\":%s,", i, state->cardList[i]);
-
-            strncat(state->payload, tmpCardStr, MAX_PAYLOAD - strlen(state->payload) - 1);
-            cardCount++;
-        }
-    }
-    snprintf(state->payload + strlen(state->payload),  // wrzucenie na koniec countera
-         MAX_PAYLOAD - strlen(state->payload), 
-         "\"cardCounter\":%d}", cardCount);
-}
 
 // callback WebSocket
 static int callbackLWS(struct lws *wsi, enum lws_callback_reasons reason,
@@ -202,7 +115,7 @@ void *wsThread(void *arg)
     printf("Serwer WebSocket działa na ws://<IP>:%d\n", PORT);
     while (!stopRequested)
     {
-        lws_service(lwsContext, 10);
+        lws_service(lwsContext, BASE_LWS_TIMEOUT);
         pthread_mutex_lock(&state->mutex);
         if (state->connectionEstablished && state->requestSend && state->wsi)
         {
@@ -230,7 +143,7 @@ void *wsThread(void *arg)
         pthread_mutex_unlock(&state->mutex);
         if (!state->connectionEstablished)
         {
-            usleep(100000); // 100ms
+            usleep(BASE_LWS_TIMEOUT); // 100ms
         }
     }
 
@@ -339,6 +252,8 @@ void *cardThread(void *arg)
     free(state->cardList);
     return NULL;
 }
+
+#ifndef UNIT_TEST
 int main(void)
 {
     // Rejestracja handlerów sygnałów
@@ -397,3 +312,4 @@ int main(void)
     }
     return 0;
 }
+#endif

@@ -197,20 +197,14 @@ int main(void)
                 lws_callback_on_writable(globalWsi);
             }
             
-            // Serwisuj WebSocket
-            lws_service(lwsContext, 10);
-            
             lastServiceTime = now;
             
             // Reset liczników
             counterRising[0] = 0;
             counterRising[1] = 0;
         }
-        else
-        {
-            // Minimalny service między wysyłkami
-            lws_service(lwsContext, 0);
-        }
+
+        lws_service(lwsContext, 90);
     }
 
     // Cleanup
