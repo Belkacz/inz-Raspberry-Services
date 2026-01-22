@@ -18,15 +18,17 @@
 #define LWS_TIMEOUT 100
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MIN_INTERVAL MIN(FPS_INTERVAL, JSON_INTERVAL_MS)
-#define FRAME_ANALYZE_STEP 2
+#define FRAME_ANALYZE_STEP 3
 
 typedef struct {
     volatile bool connectionEstablished;
-    struct timespec lastSentTime;
+    struct timespec lastStreamTime;      // dla wysyłania (5 FPS)
     struct timespec lastJsonSentTime;
     struct timespec lastFrameSentTime;
-    unsigned char frameBuffer[MAX_FRAME_SIZE];
+    unsigned char frameBuffer[MAX_FRAME_SIZE];      // dla wysyłania przez WebSocket
     size_t frameSize;
+    unsigned char prevFrameBuffer[MAX_FRAME_SIZE];  // dla analizy ruchu
+    size_t prevFrameSize;
     volatile int hasNewFrame;
     volatile int frameCounter;
     volatile bool motionDetectedFlag;
@@ -34,7 +36,7 @@ typedef struct {
     pthread_mutex_t mutex;
 } AppState;
 
-// funkcją do liczenia różnicy w czasie
+// funkcja do liczenia różnicy w czasie
 static long long timespecDiffMs(struct timespec *start, struct timespec *end)
 {
     return (end->tv_sec - start->tv_sec) * 1000LL + 
@@ -45,7 +47,6 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
 {
     AppState *state = (AppState*)ptr;
     
-    // brak analizy jeśli nie ma połączenia
     if (!state->connectionEstablished)
     {
         return;
@@ -56,54 +57,58 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
         frame->data_bytes == 0 ||
         ((unsigned char*)frame->data)[0] != 0xFF ||
         ((unsigned char*)frame->data)[1] != 0xD8 ||
-        frame->data_bytes > MAX_FRAME_SIZE) {
+        frame->data_bytes > MAX_FRAME_SIZE)
+    {
         fprintf(stderr, "[callbackUVC] Odrzucono uszkodzoną klatkę JPEG\n");
         return;
     }
     
     struct timespec timeNow;
     clock_gettime(CLOCK_MONOTONIC, &timeNow);
-    long long elapsedTime = timespecDiffMs(&state->lastSentTime, &timeNow);
-    if (elapsedTime < FPS_INTERVAL)
-    {
-        return;
-    }
-
-    unsigned char prevFrameBuffer[MAX_FRAME_SIZE];
-    size_t prevFrameSize;
     
     pthread_mutex_lock(&state->mutex);
-    // kopiowanie danych poprzedniej klatki 
-    memcpy(prevFrameBuffer, state->frameBuffer, state->frameSize);
-    prevFrameSize = state->frameSize;
     
-    // kopiowanie danych nowej klatki 
-    memcpy(state->frameBuffer, frame->data, frame->data_bytes);
-    state->frameSize = frame->data_bytes;
-    state->hasNewFrame = 1;
-    state->lastSentTime = timeNow;
+    // Inkrementuj licznik klatek (zawsze)
     state->frameCounter++;
     if(state->frameCounter >= 30)
     {
         state->frameCounter = 0;
     }
-    pthread_mutex_unlock(&state->mutex);
-
-    // analiza co drugiej klatki
-    if(prevFrameSize > 0 && state->frameCounter % FRAME_ANALYZE_STEP == 0)
+    
+    // analiza: tylko co 3. klatka (10 FPS
+    if(state->frameCounter % FRAME_ANALYZE_STEP == 0)
     {
-        bool motionNow = motion_detector_detect(
-            state->motionDetector,
-            state->frameBuffer, state->frameSize,
-            prevFrameBuffer, prevFrameSize
-        );
-        if(motionNow)
+        // Jeśli mamy poprzednią klatkę, analizuj
+        if(state->prevFrameSize > 0)
         {
-            pthread_mutex_lock(&state->mutex);
-            state->motionDetectedFlag = true;
-            pthread_mutex_unlock(&state->mutex);
+            bool motionNow = motion_detector_detect(
+                state->motionDetector,
+                (const unsigned char*)frame->data, frame->data_bytes,
+                state->prevFrameBuffer, state->prevFrameSize
+            );
+            
+            if(motionNow)
+            {
+                state->motionDetectedFlag = true;
+            }
         }
+        
+        // TERAZ zapisz obecną klatkę jako prev (dla następnej analizy)
+        memcpy(state->prevFrameBuffer, frame->data, frame->data_bytes);
+        state->prevFrameSize = frame->data_bytes;
     }
+    // Jeśli NIE czas na analizę - po prostu pomijamy, nie zapisujemy do prev
+    // kopiowanie do wysyłania - niezależnie od analizy
+    long long elapsedTime = timespecDiffMs(&state->lastStreamTime, &timeNow);
+    if (elapsedTime >= FPS_INTERVAL)
+    {
+        memcpy(state->frameBuffer, frame->data, frame->data_bytes);
+        state->frameSize = frame->data_bytes;
+        state->hasNewFrame = 1;
+        state->lastStreamTime = timeNow;
+    }
+    
+    pthread_mutex_unlock(&state->mutex);
 }
 
 static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
@@ -124,17 +129,17 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
     case LWS_CALLBACK_ESTABLISHED:
     {
         fprintf(stderr, "[WS] Klient połączony\n");
-        // zerowanie flag przy połączeniu
         pthread_mutex_lock(&state->mutex);
         state->connectionEstablished = true;
         state->hasNewFrame = 0;
         state->frameSize = 0;
+        state->prevFrameSize = 0;
         state->frameCounter = 0;
         state->motionDetectedFlag = false;
         
         struct timespec timeNow;
         clock_gettime(CLOCK_MONOTONIC, &timeNow);
-        state->lastSentTime = timeNow;
+        state->lastStreamTime = timeNow;
         state->lastJsonSentTime = timeNow;
         state->lastFrameSentTime = timeNow;
         pthread_mutex_unlock(&state->mutex);
@@ -185,7 +190,7 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
                 break;
             }
             // sprawdź czy minął czas na wysłanie ramki
-            else if (elapsedFrameTime > FPS_INTERVAL)
+            else if (elapsedFrameTime >= FPS_INTERVAL)
             {
                 unsigned char *buf = (unsigned char*)malloc(LWS_PRE + state->frameSize);
                 if (buf)
@@ -193,6 +198,7 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
                     memcpy(buf + LWS_PRE, state->frameBuffer, state->frameSize);
                     size_t frameSize = state->frameSize;
                     state->hasNewFrame = 0;
+                    state->lastFrameSentTime = timeNow;
                     pthread_mutex_unlock(&state->mutex);
                     
                     lws_write(wsi, buf + LWS_PRE, frameSize, LWS_WRITE_BINARY);
@@ -206,8 +212,6 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
             else 
             {
                 pthread_mutex_unlock(&state->mutex);
-                lws_callback_on_writable(wsi);
-                break;
             }
             lws_callback_on_writable(wsi);
         }
@@ -217,11 +221,11 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
     case LWS_CALLBACK_CLOSED:
     {
         fprintf(stderr, "[WS] Klient rozłączony\n");
-        // zerowanie flag przy rozłączeniu
         pthread_mutex_lock(&state->mutex);
         state->connectionEstablished = false;
         state->hasNewFrame = 0;
         state->frameSize = 0;
+        state->prevFrameSize = 0;
         state->frameCounter = 0;
         state->motionDetectedFlag = false;
         pthread_mutex_unlock(&state->mutex);
@@ -257,14 +261,16 @@ int main(void)
     struct timespec timeNow;
     clock_gettime(CLOCK_MONOTONIC, &timeNow);
 
-    // inicjalizacja zminnych dla state
+    // inicjalizacja zmiennych dla state
     AppState state = {
         .connectionEstablished = false,
-        .lastSentTime = timeNow,
+        .lastStreamTime = timeNow,
         .lastJsonSentTime = timeNow,
         .lastFrameSentTime = timeNow,
         .frameBuffer = {0},
         .frameSize = 0,
+        .prevFrameBuffer = {0},
+        .prevFrameSize = 0,
         .hasNewFrame = 0,
         .frameCounter = 0,
         .motionDetectedFlag = false,
@@ -278,7 +284,7 @@ int main(void)
         return 1;
     }
 
-    // zmienne kammery UVC
+    // zmienne kamery UVC
     uvc_context_t *camContext;
     uvc_device_t *device;
     uvc_device_handle_t *devHandler = NULL;
