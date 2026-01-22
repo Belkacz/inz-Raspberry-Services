@@ -2,6 +2,7 @@
 #include <opencv2/opencv.hpp>
 #include <vector>
 
+static int g_motionCallCounter = 0;
 using namespace cv;
 
 // Wewnętrzna struktura stanu detektora
@@ -34,7 +35,7 @@ bool motion_detector_detect(void* detector,
     
     MotionDetectorState* state = static_cast<MotionDetectorState*>(detector);
     
-    // Dekoduj aktualną klatkę z MJPEG
+    // dekoduj aktualną klatkę z MJPEG
     std::vector<uchar> currentVec(currentBuffer, currentBuffer + currentSize);
     Mat currentFrame = imdecode(currentVec, IMREAD_COLOR);
     
@@ -43,35 +44,30 @@ bool motion_detector_detect(void* detector,
         return false;
     }
     
-    // Jeśli to pierwsze wywołanie lub brak poprzedniej klatki
+    // jeśli to pierwsze wywołanie lub brak poprzedniej klatki
     if (!prevBuffer || prevSize == 0 || state->prevFrame.empty())
     {
         state->prevFrame = currentFrame.clone();
         return false;
     }
     
-    // Konwersja do skali szarości
+    // konwersja do skali szarości
     Mat gray, prevGray;
     cvtColor(currentFrame, gray, COLOR_BGR2GRAY);
     cvtColor(state->prevFrame, prevGray, COLOR_BGR2GRAY);
-    
-    // Rozmycie gaussowskie
+    // rozmycie gaussa
     GaussianBlur(gray, gray, Size(state->params.gaussBlur, state->params.gaussBlur), 0);
     GaussianBlur(prevGray, prevGray, Size(state->params.gaussBlur, state->params.gaussBlur), 0);
-    
-    // Różnica klatek
+    // różnica klatek A i B
     Mat frameDelta;
     absdiff(prevGray, gray, frameDelta);
-    
-    // Progowanie
+    // progowanie
     Mat thresh;
     threshold(frameDelta, thresh, state->params.motionThreshold, 255, THRESH_BINARY);
-    
-    // Dylatacja
+    // pogrubienie
     Mat kernel = getStructuringElement(MORPH_RECT, Size(3, 3));
     dilate(thresh, thresh, kernel, Point(-1, -1), 2);
-    
-    // Znajdź kontury
+    // znajdowenie konturów
     std::vector<std::vector<Point>> contours;
     findContours(thresh, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
     

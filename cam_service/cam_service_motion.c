@@ -18,13 +18,7 @@
 #define LWS_TIMEOUT 100
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MIN_INTERVAL MIN(FPS_INTERVAL, JSON_INTERVAL_MS)
-// #define ANALYZE_INTERVAL (1000 / 15)
-
-// Globalne zmienne dla kamery
-static uvc_device_handle_t *g_devHandler = NULL;
-static uvc_stream_ctrl_t g_streamCtrl;
-static volatile bool g_isStreaming = false;
-static pthread_mutex_t g_streamMutex = PTHREAD_MUTEX_INITIALIZER;
+#define FRAME_ANALYZE_STEP 2
 
 typedef struct {
     volatile bool connectionEstablished;
@@ -40,38 +34,36 @@ typedef struct {
     pthread_mutex_t mutex;
 } AppState;
 
-static long long timespec_diff_ms(struct timespec *start, struct timespec *end)
+// funkcją do liczenia różnicy w czasie
+static long long timespecDiffMs(struct timespec *start, struct timespec *end)
 {
     return (end->tv_sec - start->tv_sec) * 1000LL + 
            (end->tv_nsec - start->tv_nsec) / 1000000LL;
 }
 
-
 static void callbackUVC(uvc_frame_t *frame, void *ptr)
 {
     AppState *state = (AppState*)ptr;
     
+    // brak analizy jeśli nie ma połączenia
     if (!state->connectionEstablished)
     {
         return;
     }
     
-    // if (!frame || frame->data_bytes == 0 || frame->data_bytes > MAX_FRAME_SIZE)
-    // {
-    //     return;
-    // }
+    // sprawdzanie poprawności klatki
     if (!frame ||
         frame->data_bytes == 0 ||
-        // frame->data_bytes < 100  ||
         ((unsigned char*)frame->data)[0] != 0xFF ||
         ((unsigned char*)frame->data)[1] != 0xD8 ||
         frame->data_bytes > MAX_FRAME_SIZE) {
         fprintf(stderr, "[callbackUVC] Odrzucono uszkodzoną klatkę JPEG\n");
         return;
     }
+    
     struct timespec timeNow;
     clock_gettime(CLOCK_MONOTONIC, &timeNow);
-    long long elapsedTime = timespec_diff_ms(&state->lastSentTime, &timeNow);
+    long long elapsedTime = timespecDiffMs(&state->lastSentTime, &timeNow);
     if (elapsedTime < FPS_INTERVAL)
     {
         return;
@@ -81,9 +73,11 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
     size_t prevFrameSize;
     
     pthread_mutex_lock(&state->mutex);
+    // kopiowanie danych poprzedniej klatki 
     memcpy(prevFrameBuffer, state->frameBuffer, state->frameSize);
     prevFrameSize = state->frameSize;
     
+    // kopiowanie danych nowej klatki 
     memcpy(state->frameBuffer, frame->data, frame->data_bytes);
     state->frameSize = frame->data_bytes;
     state->hasNewFrame = 1;
@@ -95,7 +89,8 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
     }
     pthread_mutex_unlock(&state->mutex);
 
-    if(prevFrameSize > 0 && state->frameCounter % 2 == 0)
+    // analiza co drugiej klatki
+    if(prevFrameSize > 0 && state->frameCounter % FRAME_ANALYZE_STEP == 0)
     {
         bool motionNow = motion_detector_detect(
             state->motionDetector,
@@ -109,62 +104,6 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
             pthread_mutex_unlock(&state->mutex);
         }
     }
-}
-
-// Funkcja do startowania streamu
-static bool startCameraStream(AppState *state)
-{
-    pthread_mutex_lock(&g_streamMutex);
-    
-    if (g_isStreaming)
-    {
-        pthread_mutex_unlock(&g_streamMutex);
-        return true;
-    }
-    
-    if (!g_devHandler)
-    {
-        fprintf(stderr, "[CAM] Błąd: brak uchwytu kamery\n");
-        pthread_mutex_unlock(&g_streamMutex);
-        return false;
-    }
-    
-    // POPRAWKA: usleep zamiast sleep(1000000)
-    usleep(100000); // 100ms delay
-    
-    uvc_error_t res = uvc_start_streaming(g_devHandler, &g_streamCtrl, callbackUVC, state, 0);
-    if (res < 0)
-    {
-        uvc_perror(res, "[CAM] Błąd uruchomienia streamu\n");
-        pthread_mutex_unlock(&g_streamMutex);
-        return false;
-    }
-    
-    g_isStreaming = true;
-    fprintf(stderr, "[CAM] Stream uruchomiony\n");
-    pthread_mutex_unlock(&g_streamMutex);
-    return true;
-}
-
-// Funkcja do zatrzymywania streamu
-static void stopCameraStream(void)
-{
-    pthread_mutex_lock(&g_streamMutex);
-    
-    if (!g_isStreaming)
-    {
-        pthread_mutex_unlock(&g_streamMutex);
-        return;
-    }
-    
-    if (g_devHandler)
-    {
-        uvc_stop_streaming(g_devHandler);
-        fprintf(stderr, "[CAM] Stream zatrzymany\n");
-    }
-    
-    g_isStreaming = false;
-    pthread_mutex_unlock(&g_streamMutex);
 }
 
 static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
@@ -185,7 +124,7 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
     case LWS_CALLBACK_ESTABLISHED:
     {
         fprintf(stderr, "[WS] Klient połączony\n");
-        
+        // zerowanie flag przy połączeniu
         pthread_mutex_lock(&state->mutex);
         state->connectionEstablished = true;
         state->hasNewFrame = 0;
@@ -218,10 +157,10 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
             
             struct timespec timeNow;
             clock_gettime(CLOCK_MONOTONIC, &timeNow);
-            long long elapsedJsonTime = timespec_diff_ms(&state->lastJsonSentTime, &timeNow);
-            long long elapsedFrameTime = timespec_diff_ms(&state->lastFrameSentTime, &timeNow);
+            long long elapsedJsonTime = timespecDiffMs(&state->lastJsonSentTime, &timeNow);
+            long long elapsedFrameTime = timespecDiffMs(&state->lastFrameSentTime, &timeNow);
             
-            // Wysyłaj JSON co 10 sekund
+            // wysyłaj JSON co 10 sekund
             if(elapsedJsonTime >= JSON_INTERVAL_MS)
             {
                 bool motion = state->motionDetectedFlag;
@@ -245,7 +184,7 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
                 lws_callback_on_writable(wsi);
                 break;
             }
-            // Sprawdź czy minął czas na wysłanie ramki
+            // sprawdź czy minął czas na wysłanie ramki
             else if (elapsedFrameTime > FPS_INTERVAL)
             {
                 unsigned char *buf = (unsigned char*)malloc(LWS_PRE + state->frameSize);
@@ -254,8 +193,6 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
                     memcpy(buf + LWS_PRE, state->frameBuffer, state->frameSize);
                     size_t frameSize = state->frameSize;
                     state->hasNewFrame = 0;
-                    state->lastFrameSentTime = timeNow;
-                    printf("[callbackWs] WYSYŁAM KLATÓWE  frameSize  = %lu , TIME: = %ld\n", frameSize, timeNow.tv_sec);
                     pthread_mutex_unlock(&state->mutex);
                     
                     lws_write(wsi, buf + LWS_PRE, frameSize, LWS_WRITE_BINARY);
@@ -265,20 +202,13 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
                 {
                     pthread_mutex_unlock(&state->mutex);
                 }
-            } else 
+            } 
+            else 
             {
                 pthread_mutex_unlock(&state->mutex);
                 lws_callback_on_writable(wsi);
                 break;
             }
-            // else if(elapsedFrameTime < FPS_INTERVAL)
-            // {
-            //     // printf("[callbackWs]OMIJAM KALTÓWE BO elapsedFrameTime = %lld , FPS_INTERVAL: = %d\n", elapsedFrameTime, FPS_INTERVAL );
-            //     pthread_mutex_unlock(&state->mutex);
-            //     lws_callback_on_writable(wsi);
-            //     break;
-            // }
-
             lws_callback_on_writable(wsi);
         }
         break;
@@ -287,7 +217,7 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
     case LWS_CALLBACK_CLOSED:
     {
         fprintf(stderr, "[WS] Klient rozłączony\n");
-
+        // zerowanie flag przy rozłączeniu
         pthread_mutex_lock(&state->mutex);
         state->connectionEstablished = false;
         state->hasNewFrame = 0;
@@ -327,7 +257,7 @@ int main(void)
     struct timespec timeNow;
     clock_gettime(CLOCK_MONOTONIC, &timeNow);
 
-    // POPRAWKA: Inicjalizuj wszystkie pola czasu
+    // inicjalizacja zminnych dla state
     AppState state = {
         .connectionEstablished = false,
         .lastSentTime = timeNow,
@@ -348,8 +278,11 @@ int main(void)
         return 1;
     }
 
+    // zmienne kammery UVC
     uvc_context_t *camContext;
     uvc_device_t *device;
+    uvc_device_handle_t *devHandler = NULL;
+    uvc_stream_ctrl_t streamCtrl;
     uvc_error_t res;
 
     // Inicjalizacja UVC
@@ -370,7 +303,7 @@ int main(void)
         return 1;
     }
 
-    res = uvc_open(device, &g_devHandler);
+    res = uvc_open(device, &devHandler);
     if (res < 0)
     {
         uvc_perror(res, "uvc_open");
@@ -380,22 +313,21 @@ int main(void)
         return 1;
     }
     
-    // Krótkie opóźnienie po otwarciu urządzenia
-    usleep(300000); // 100ms
+    usleep(300000); // 300ms delay
     
-    res = uvc_get_stream_ctrl_format_size(g_devHandler, &g_streamCtrl, 
+    res = uvc_get_stream_ctrl_format_size(devHandler, &streamCtrl, 
                                           UVC_FRAME_FORMAT_MJPEG, 640, 480, FPS);
     if (res < 0)
     {
         uvc_perror(res, "get_stream_ctrl");
-        uvc_close(g_devHandler);
+        uvc_close(devHandler);
         uvc_unref_device(device);
         uvc_exit(camContext);
         motion_detector_destroy(state.motionDetector);
         return 1;
     }
 
-    // WebSocket - ustaw najpierw serwer
+    // protokół WebSocket
     struct lws_protocols protocols[] =
     {   
         { "cam-protocol", callbackWs, 0, MAX_FRAME_SIZE, 0, NULL, 0},
@@ -408,11 +340,12 @@ int main(void)
     info.protocols = protocols;
     info.user = &state;
 
+    // tworzenie kontekstu WebSocket
     lwsContext = lws_create_context(&info);
     if (!lwsContext)
     {
         fprintf(stderr, "Błąd: nie udało się utworzyć kontekstu WebSocket\n");
-        uvc_close(g_devHandler);
+        uvc_close(devHandler);
         uvc_unref_device(device);
         uvc_exit(camContext);
         motion_detector_destroy(state.motionDetector);
@@ -421,35 +354,38 @@ int main(void)
 
     fprintf(stderr, "Serwer WebSocket działa na ws://<IP>:%d\n", PORT);
     
-    // POPRAWKA: Uruchom kamerę dopiero po inicjalizacji WebSocket
-    if (!startCameraStream(&state))
+    // start streamu z kamery
+    usleep(100000); // 100ms delay
+    res = uvc_start_streaming(devHandler, &streamCtrl, callbackUVC, &state, 0);
+    if (res < 0)
     {
-        fprintf(stderr, "Nie udało się uruchomić streamu kamery\n");
+        uvc_perror(res, "[CAM] Błąd uruchomienia streamu");
         lws_context_destroy(lwsContext);
-        uvc_close(g_devHandler);
+        uvc_close(devHandler);
         uvc_unref_device(device);
         uvc_exit(camContext);
         motion_detector_destroy(state.motionDetector);
         return 1;
     }
+    fprintf(stderr, "[CAM] Stream uruchomiony\n");
     
-    // Główna pętla - tylko obsługa WebSocket
+    // główna pętla dla obsługi WebSocket
     while (!stopRequested)
     {
         lws_service(lwsContext, LWS_TIMEOUT);
-        usleep(MIN_INTERVAL * 1000); // najmniejszy interwał
+        usleep(MIN_INTERVAL * 1000);
     }
 
     // Cleanup
     fprintf(stderr, "[SHUTDOWN] Rozpoczęcie zamykania programu...\n");
-    stopCameraStream();
-    uvc_close(g_devHandler);
+    uvc_stop_streaming(devHandler);
+    fprintf(stderr, "[CAM] Stream zatrzymany\n");
+    uvc_close(devHandler);
     uvc_unref_device(device);
     uvc_exit(camContext);
     lws_context_destroy(lwsContext);
     motion_detector_destroy(state.motionDetector);
     pthread_mutex_destroy(&state.mutex);
-    pthread_mutex_destroy(&g_streamMutex);
     
     if (logFile)
     {
