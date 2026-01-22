@@ -437,7 +437,7 @@ int main(void)
     while (!stopRequested)
     {
         lws_service(lwsContext, LWS_TIMEOUT);
-        usleep(MIN_INTERVAL * 1000); // 10ms - bardziej responsywne
+        usleep(MIN_INTERVAL * 1000); // najmniejszy interwał
     }
 
     // Cleanup

@@ -49,6 +49,7 @@ static int callbackLWS(struct lws *wsi, enum lws_callback_reasons reason,
         {
             char message[MAX_PAYLOAD] = "\0";
             pthread_mutex_lock(&state->mutex);
+            // kopiowanie danych do widomości
             if(!(state->payload[0] == '\0'))
             {
                 len = strlen(state->payload);
@@ -115,6 +116,7 @@ void *wsThread(void *arg)
     printf("Serwer WebSocket działa na ws://<IP>:%d\n", PORT);
     while (!stopRequested)
     {
+        // poącztkowy serwis by spróbować się połaczyć lub wykonać wysyłkę
         lws_service(lwsContext, BASE_LWS_TIMEOUT);
         pthread_mutex_lock(&state->mutex);
         if (state->connectionEstablished && state->requestSend && state->wsi)
@@ -123,7 +125,7 @@ void *wsThread(void *arg)
             state->requestSend = false;
         }
         
-        // Jeśli połączony - czekaj na sygnał (z timeoutem)
+        // jeśli połączony - czekaj na sygnał (z timeoutem)
         if (state->connectionEstablished && state->wsi)
         {
             struct timespec delay;
@@ -131,19 +133,21 @@ void *wsThread(void *arg)
 
             unsigned long hundredMilliseconds = 100 * 1000000UL;
             delay.tv_nsec += hundredMilliseconds;
-
+            // ustanowienie delay na 10s
             if (delay.tv_nsec >= 1000000000L)
             {
                 delay.tv_sec += 1;
                 delay.tv_nsec -= 1000000000L;
             }
+            // oczekiwnie na syngał lub koniec czasu
             pthread_cond_timedwait(&state->payloadCond, &state->mutex, &delay);
         }
         
         pthread_mutex_unlock(&state->mutex);
+        // brak połączenie krrótkie uśpienie przed ponownym obrotem pętli
         if (!state->connectionEstablished)
         {
-            usleep(BASE_LWS_TIMEOUT); // 100ms
+            usleep(BASE_LWS_TIMEOUT); // 90ms
         }
     }
 
@@ -179,6 +183,7 @@ void *cardThread(void *arg)
     char cardBuf[MAX_CARD_LEN] = {0};
     size_t cardPos = 0;
 
+    // otworzenie czytnika
     int file = open(CARD_INPUT, O_RDONLY | O_NONBLOCK);
     if (file < 0)
     {
@@ -188,22 +193,26 @@ void *cardThread(void *arg)
         return NULL;
     }
 
+    // mapa do odczytu danych z HID
     const char *keycodes[] = {
         "", "", "", "", "a","b","c","d","e","f","g","h","i","j","k","l","m","n","o","p","q","r","s","t","u","v","w","x","y","z",
         "1","2","3","4","5","6","7","8","9","0"
     };
 
+    // główna pętla dla kart
     while (!stopRequested)
     {
         unsigned char buf[8];
+        // odczyt danych z czytnika
         ssize_t n = read(file, buf, sizeof(buf));
+        // długość mniejsza lub równa 0 to błędny odczyt
         if (n <= 0)
         {
             usleep(1000000);
-            // sleep(1);
         } else
         {
             int code = buf[2];
+            // 0x28 enter - koniec odczytu
             if (code == 0x28)
             {
                 if (cardPos > 0)
@@ -211,7 +220,7 @@ void *cardThread(void *arg)
                     cardBuf[cardPos] = '\0';
                     pthread_mutex_lock(&state->mutex);
                     
-                    // Logika dodawania/usuwania karty
+                    // logika dodawania/usuwania karty
                     int ret = findCardInList(cardBuf, (const char**)state->cardList, state->currentCardListSize);
                     if (ret == -1)
                     {
@@ -220,7 +229,7 @@ void *cardThread(void *arg)
                         removeCardFromList(ret, &state->cardList, state->currentCardListSize);
                     }
 
-                    // Budowanie payload
+                    // budowanie payload
                     state->payload[0] = '\0';
                     buildPayloud(state);
 
@@ -231,16 +240,17 @@ void *cardThread(void *arg)
                         lws_callback_on_writable(state->wsi);
                         lws_cancel_service(lwsContext);
                     }
-                    cardPos = 0;
+                    cardPos = 0; // zerowanie pozytcji na następne odczyty
                     pthread_cond_signal(&state->payloadCond);
                     pthread_mutex_unlock(&state->mutex);
                 }
+                // kody w zakresie 0x03 do 0x28 to odczytywane znaki
             } else if (code > 0x03 && code < 0x28)
             {
                 if (cardPos < MAX_CARD_LEN - 1)
                 {
-                    char c = keycodes[code][0];
-                    cardBuf[cardPos] = c;
+                    char charCode = keycodes[code][0];
+                    cardBuf[cardPos] = charCode;
                     cardPos++;
                 }
             }
@@ -256,7 +266,7 @@ void *cardThread(void *arg)
 #ifndef UNIT_TEST
 int main(void)
 {
-    // Rejestracja handlerów sygnałów
+    // rejestracja handlerów sygnałów
     signal(SIGINT, handleSignal);
     signal(SIGTERM, handleSignal);
     signal(SIGSEGV, handleSignal);
@@ -264,7 +274,7 @@ int main(void)
 
     FILE *logFile = fopen("/var/log/cardService.log", "a");
 
-    // Inicjalizacja AppState
+    // inicjalizacja AppState
     AppState state = {
         .payload = "\0",
         .wsi = NULL,
@@ -274,7 +284,7 @@ int main(void)
         .requestSend = false
     };
 
-    // Inicjalizacja mutex i condition variable
+    // inicjalizacja mutex i condition variable
     pthread_mutex_init(&state.mutex, NULL);
     pthread_cond_init(&state.payloadCond, NULL);
 
@@ -284,6 +294,7 @@ int main(void)
     pthread_t thread_ws, thread_card;
     int ret;
 
+    // uruchmonie wątki Websocket
     ret = pthread_create(&thread_ws, NULL, wsThread, &state);
     if (ret != 0)
     {
@@ -293,6 +304,7 @@ int main(void)
 
     sleep(1);
 
+    // uruchmonie wątki kart
     ret = pthread_create(&thread_card, NULL, cardThread, &state);
     if (ret != 0)
     {

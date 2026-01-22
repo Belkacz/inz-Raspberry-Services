@@ -12,6 +12,7 @@
 
 #include <gpiod.h>
 #include <libwebsockets.h>
+#include <pthread.h>
 #include "../common.h"
 
 #define PIR_PIN1 26
@@ -27,6 +28,7 @@ static struct gpiod_line *line2 = NULL;
 static char payload[MAX_PAYLOAD];
 static struct lws *globalWsi = NULL;
 static bool connectionEstablished = false;
+static pthread_mutex_t payloadMutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* callback WebSocket */
 static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
@@ -45,14 +47,18 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
             break;
 
         case LWS_CALLBACK_SERVER_WRITEABLE:
+        // blokowanie mutex dla bezpieczeństwa
+            pthread_mutex_lock(&payloadMutex);
             if (payload[0] != '\0' && globalWsi)
             {
                 unsigned char buffer[LWS_PRE + MAX_PAYLOAD];
                 size_t n = strlen(payload);
+                // kopiowanie payload
                 memcpy(&buffer[LWS_PRE], payload, n);
                 lws_write(globalWsi, &buffer[LWS_PRE], n, LWS_WRITE_TEXT);
                 payload[0] = '\0';
             }
+            pthread_mutex_unlock(&payloadMutex);
             break;
 
         case LWS_CALLBACK_CLOSED:
@@ -92,7 +98,7 @@ int main(void)
         fprintf(stderr, "Błąd: nie można otworzyć gpiochip0\n");
         return 1;
     }
-
+    // przypisanie czujników do zmiennych
     line1 = gpiod_chip_get_line(chip, PIR_PIN1);
     line2 = gpiod_chip_get_line(chip, PIR_PIN2);
     if (!line1 || !line2)
@@ -125,27 +131,29 @@ int main(void)
     }
 
     printf("Serwer WebSocket działa na ws://<IP>:%d\n", PORT);
-
+    // inicjalizcja linii
     struct gpiod_line_bulk bulk, activated;
     gpiod_line_bulk_init(&bulk);
     gpiod_line_bulk_add(&bulk, line1);
     gpiod_line_bulk_add(&bulk, line2);
 
     struct gpiod_line_event event;
-    int counterRising[2] = {0, 0}; // [0] dla GPIO26, [1] dla GPIO16
+    int counterRising[2] = {0, 0}; // [0] dla GPIO26, [0] dla GPIO16
     time_t lastServiceTime = 0;
     
-    // Wyślij początkowy stan
+    // Wyślij początkowy stan mutex dla bezpieczeństwa
+    pthread_mutex_lock(&payloadMutex);
     snprintf(payload, sizeof(payload),
         "{\"pir%dRisingCounter\":0,\"pir%dRisingCounter\":0,\"time\":%ld}", 
         PIR_PIN1, PIR_PIN2, (long)time(NULL));
+    pthread_mutex_unlock(&payloadMutex);
     
     while (!stopRequested)
     {
         time_t now = time(NULL);
         struct timespec timeout;
         
-        // Ustaw timeout w zależności od stanu połączenia
+        // ustaw timeout w zależności od stanu połączenia
         if (connectionEstablished)
         {
             timeout.tv_sec = STD_DELAY;
@@ -156,10 +164,11 @@ int main(void)
         }
         timeout.tv_nsec = 0;
         
-        // Czekaj na eventy GPIO
+        // czekaj na eventy GPIO
         int ret = gpiod_line_event_wait_bulk(&bulk, &timeout, &activated);
         if (ret > 0)
         {
+            // iteracjac po liniach
             for (unsigned int i = 0; i < gpiod_line_bulk_num_lines(&activated); i++)
             {
                 struct gpiod_line *line = gpiod_line_bulk_get_line(&activated, i);
@@ -167,8 +176,10 @@ int main(void)
                 {
                     unsigned int offset = gpiod_line_offset(line);
                     
+                    // sprawdzenie eventów
                     if (event.event_type == GPIOD_LINE_EVENT_RISING_EDGE)
                     {
+                        // inkrementacja liczników
                         if (offset == PIR_PIN1)
                         {
                             counterRising[0]++;
@@ -187,10 +198,11 @@ int main(void)
         if (difftime(now, lastServiceTime) >= delay)
         {
             // Przygotuj payload
+            pthread_mutex_lock(&payloadMutex);
             snprintf(payload, sizeof(payload),
                 "{\"pir%dRisingCounter\":%d,\"pir%dRisingCounter\":%d,\"time\":%ld}",
                 PIR_PIN1, counterRising[0], PIR_PIN2, counterRising[1], (long)now);
-            
+            pthread_mutex_unlock(&payloadMutex);
             // Powiadom WebSocket o danych do wysłania
             if (globalWsi)
             {
@@ -204,7 +216,7 @@ int main(void)
             counterRising[1] = 0;
         }
 
-        lws_service(lwsContext, 90);
+        lws_service(lwsContext, BASE_LWS_TIMEOUT);
     }
 
     // Cleanup
