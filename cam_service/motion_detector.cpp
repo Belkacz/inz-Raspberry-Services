@@ -2,7 +2,6 @@
 #include <opencv2/opencv.hpp>
 #include <vector>
 
-static int g_motionCallCounter = 0;
 using namespace cv;
 
 // Wewnętrzna struktura stanu detektora
