@@ -97,10 +97,8 @@ static void test_detects_motion_different_images(void **state) {
     assert_non_null(img1.data);
     assert_non_null(img2.data);
     
-    // Inicjalizacja pierwszym obrazem
-    motion_detector_detect(detector, img1.data, img1.size, NULL, 0);
     
-    // Drugi obraz - powinien wykryć ruch
+    // dwa obrazy - powinien wykryć ruch
     bool motion = motion_detector_detect(detector,
         img2.data, img2.size, img1.data, img1.size);
     
@@ -201,9 +199,6 @@ static void test_motion_parameters(void **state)
     void* detector1 = motion_detector_init(640, 480, sensitive);
     assert_non_null(detector1);
 
-    // inicjalizacja
-    motion_detector_detect(detector1, img1.data, img1.size, NULL, 0);
-
     bool motion1 = motion_detector_detect(
         detector1, img2.data, img2.size, img1.data, img1.size);
 
@@ -218,10 +213,8 @@ static void test_motion_parameters(void **state)
         .gaussBlur = 21
     };
 
-    void* detector2 = motion_detector_init(640, 480, insensitive);
+    void* detector2 = motion_detector_init(480, 480, insensitive);
     assert_non_null(detector2);
-
-    motion_detector_detect(detector2, img1.data, img1.size, NULL, 0);
 
     bool motion2 = motion_detector_detect(
         detector2, img2.data, img2.size, img1.data, img1.size);
@@ -240,12 +233,76 @@ static void test_motion_parameters(void **state)
     void* detector3 = motion_detector_init(640, 480, base);
     assert_non_null(detector3);
 
-    motion_detector_detect(detector3, img1.data, img1.size, NULL, 0);
-
     bool motion3 = motion_detector_detect(
         detector3, img2.data, img2.size, img1.data, img1.size);
 
     // printf("Detektor 3: %s\n", motion ? "wykrył ruch" : "nie wykrył");
+    assert_true(motion3);
+    motion_detector_destroy(detector3);
+
+    free_image_buffer(&img1);
+    free_image_buffer(&img2);
+}
+
+
+// Test 6: Różne parametry detekcji przykład finger
+static void test_motion_parameters2(void **state)
+{
+    (void)state;
+
+    ImageBuffer img1 = load_jpeg_file("images/finger4.jpg");
+    ImageBuffer img2 = load_jpeg_file("images/finger5.jpg");
+
+    // 1. detektor: tresh 5; min area 50; blur 21
+    MotionParams sensitive = {
+        .motionThreshold = 5,
+        .minArea = 50,
+        .gaussBlur = 21
+    };
+
+    void* detector1 = motion_detector_init(640, 480, sensitive);
+    assert_non_null(detector1);
+
+    // inicjalizacja
+
+    bool motion1 = motion_detector_detect(
+        detector1, img2.data, img2.size, img1.data, img1.size);
+
+    // printf("Czuły detektor: %s\n", motion1 ? "wykrył ruch" : "nie wykrył");
+    assert_true(motion1);
+    motion_detector_destroy(detector1);
+
+    // 2. detektor: tresh 50; min area 500; blur 21
+    MotionParams insensitive = {
+        .motionThreshold = 50,
+        .minArea = 500,
+        .gaussBlur = 21
+    };
+
+    void* detector2 = motion_detector_init(640, 480, insensitive);
+    assert_non_null(detector2);
+
+    bool motion2 = motion_detector_detect(
+        detector2, img2.data, img2.size, img1.data, img1.size);
+
+    // printf("Detekrtor 2: %s\n", motion2 ? "wykrył ruch" : "nie wykrył");
+    assert_false(motion2);
+    motion_detector_destroy(detector2);
+
+    // 3. detektor standardowy: tresh 50; min area 200; blur 21
+    MotionParams base = {
+        .motionThreshold = 20,
+        .minArea = 200,
+        .gaussBlur = 21
+    };
+
+    void* detector3 = motion_detector_init(640, 480, base);
+    assert_non_null(detector3);
+
+    bool motion3 = motion_detector_detect(
+        detector3, img2.data, img2.size, img1.data, img1.size);
+
+    // printf("Detektor 3: %s\n", motion3 ? "wykrył ruch" : "nie wykrył");
     assert_true(motion3);
     motion_detector_destroy(detector3);
 
@@ -263,7 +320,8 @@ int main(void) {
         cmocka_unit_test_setup_teardown(test_alternating_frames, setup, teardown),
         cmocka_unit_test_setup_teardown(test_invalid_input, setup, teardown),
         cmocka_unit_test_setup_teardown(test_jpeg_validation, setup, teardown),
-        cmocka_unit_test(test_motion_parameters),
+        cmocka_unit_test_setup_teardown(test_motion_parameters, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_motion_parameters2, setup, teardown),
     };
     
     return cmocka_run_group_tests(tests, NULL, NULL);

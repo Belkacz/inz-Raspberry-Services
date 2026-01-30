@@ -1,6 +1,6 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -O2 -I..
-LIBS = -lwebsockets -lgpiod
+LIBS = -lwebsockets -lgpiod -lpthread
 
 TARGET = pir_service
 SOURCES = pir_service.c ../common.c

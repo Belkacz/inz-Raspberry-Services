@@ -75,7 +75,7 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
         state->frameCounter = 0;
     }
     
-    // analiza: tylko co 3. klatka (10 FPS
+    // analiza: tylko co FRAME_ANALYZE_STEP (3)cia klatka (10 FPS)
     if(state->frameCounter % FRAME_ANALYZE_STEP == 0)
     {
         // Jeśli mamy poprzednią klatkę, analizuj
@@ -93,11 +93,11 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
             }
         }
         
-        // TERAZ zapisz obecną klatkę jako prev (dla następnej analizy)
+        // zapisz obecną klatkę jako prev (dla następnej analizy)
         memcpy(state->prevFrameBuffer, frame->data, frame->data_bytes);
         state->prevFrameSize = frame->data_bytes;
     }
-    // Jeśli NIE czas na analizę - po prostu pomijamy, nie zapisujemy do prev
+    // Jeśli nie czas na analizę - po prostu pomijamy, nie zapisujemy do prev
     // kopiowanie do wysyłania - niezależnie od analizy
     long long elapsedTime = timespecDiffMs(&state->lastStreamTime, &timeNow);
     if (elapsedTime >= FPS_INTERVAL)
