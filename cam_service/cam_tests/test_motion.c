@@ -181,8 +181,8 @@ static void test_jpeg_validation(void **state) {
     free_image_buffer(&img);
 }
 
-// Test 6: Różne parametry detekcji
-static void test_motion_parameters(void **state)
+// Test 6: Różne parametry detekcji duży ruch
+static void test_motion_parameters_big_movment(void **state)
 {
     (void)state;
 
@@ -202,7 +202,6 @@ static void test_motion_parameters(void **state)
     bool motion1 = motion_detector_detect(
         detector1, img2.data, img2.size, img1.data, img1.size);
 
-    // printf("Czuły detektor: %s\n", motion1 ? "wykrył ruch" : "nie wykrył");
     assert_true(motion1);
     motion_detector_destroy(detector1);
 
@@ -219,7 +218,6 @@ static void test_motion_parameters(void **state)
     bool motion2 = motion_detector_detect(
         detector2, img2.data, img2.size, img1.data, img1.size);
 
-    // printf("Detekrtor 2: %s\n", motion ? "wykrył ruch" : "nie wykrył");
     assert_true(motion2);
     motion_detector_destroy(detector2);
 
@@ -236,7 +234,6 @@ static void test_motion_parameters(void **state)
     bool motion3 = motion_detector_detect(
         detector3, img2.data, img2.size, img1.data, img1.size);
 
-    // printf("Detektor 3: %s\n", motion ? "wykrył ruch" : "nie wykrył");
     assert_true(motion3);
     motion_detector_destroy(detector3);
 
@@ -245,8 +242,8 @@ static void test_motion_parameters(void **state)
 }
 
 
-// Test 6: Różne parametry detekcji przykład finger
-static void test_motion_parameters2(void **state)
+// Test 7: Różne parametry detekcji przykład finger
+static void test_motion_parameters_small_movment(void **state)
 {
     (void)state;
 
@@ -268,7 +265,6 @@ static void test_motion_parameters2(void **state)
     bool motion1 = motion_detector_detect(
         detector1, img2.data, img2.size, img1.data, img1.size);
 
-    // printf("Czuły detektor: %s\n", motion1 ? "wykrył ruch" : "nie wykrył");
     assert_true(motion1);
     motion_detector_destroy(detector1);
 
@@ -285,7 +281,6 @@ static void test_motion_parameters2(void **state)
     bool motion2 = motion_detector_detect(
         detector2, img2.data, img2.size, img1.data, img1.size);
 
-    // printf("Detekrtor 2: %s\n", motion2 ? "wykrył ruch" : "nie wykrył");
     assert_false(motion2);
     motion_detector_destroy(detector2);
 
@@ -302,7 +297,6 @@ static void test_motion_parameters2(void **state)
     bool motion3 = motion_detector_detect(
         detector3, img2.data, img2.size, img1.data, img1.size);
 
-    // printf("Detektor 3: %s\n", motion3 ? "wykrył ruch" : "nie wykrył");
     assert_true(motion3);
     motion_detector_destroy(detector3);
 
@@ -320,8 +314,8 @@ int main(void) {
         cmocka_unit_test_setup_teardown(test_alternating_frames, setup, teardown),
         cmocka_unit_test_setup_teardown(test_invalid_input, setup, teardown),
         cmocka_unit_test_setup_teardown(test_jpeg_validation, setup, teardown),
-        cmocka_unit_test_setup_teardown(test_motion_parameters, setup, teardown),
-        cmocka_unit_test_setup_teardown(test_motion_parameters2, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_motion_parameters_big_movment, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_motion_parameters_small_movment, setup, teardown),
     };
     
     return cmocka_run_group_tests(tests, NULL, NULL);
