@@ -22,7 +22,6 @@
 
 typedef struct {
     volatile bool connectionEstablished;
-    struct timespec lastStreamTime;      // dla wysyłania (5 FPS)
     struct timespec lastJsonSentTime;
     struct timespec lastFrameSentTime;
     unsigned char frameBuffer[MAX_FRAME_SIZE];      // dla wysyłania przez WebSocket
@@ -87,7 +86,6 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
         memcpy(state->frameBuffer, frame->data, frame->data_bytes);
         state->frameSize = frame->data_bytes;
         state->hasNewFrame = 1;
-        state->lastStreamTime = timeNow;
     }
     // analiza: tylko co FRAME_ANALYZE_STEP (30)
     if(state->frameCounter % FRAME_ANALYZE_STEP == 0)
@@ -140,7 +138,6 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
         
         struct timespec timeNow;
         clock_gettime(CLOCK_MONOTONIC, &timeNow);
-        state->lastStreamTime = timeNow;
         state->lastJsonSentTime = timeNow;
         state->lastFrameSentTime = timeNow;
         pthread_mutex_unlock(&state->mutex);
@@ -265,7 +262,6 @@ int main(void)
     // inicjalizacja zmiennych dla state
     AppState state = {
         .connectionEstablished = false,
-        .lastStreamTime = timeNow,
         .lastJsonSentTime = timeNow,
         .lastFrameSentTime = timeNow,
         .frameBuffer = {0},
