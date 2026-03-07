@@ -48,6 +48,31 @@ bool motion_detector_detect(void* detector,
     {
         return false;
     }
+    if (currentFrame.cols != state->width || currentFrame.rows != state->height ||
+    prevFrame.cols != state->width || prevFrame.rows != state->height)
+    {
+        fprintf(stderr, "[MotionDetector] Niepoprawny rozmiar klatki: current=%dx%d prev=%dx%d oczekiwano=%dx%d\n",
+                currentFrame.cols, currentFrame.rows,
+                prevFrame.cols, prevFrame.rows,
+                state->width, state->height);
+        return false;
+    }
+
+    // zapisz uszkodzoną klatkę do pliku
+    if (currentFrame.empty())
+    {
+        FILE *f = fopen("/tmp/bad_frame_current.jpg", "wb");
+        if (f) { fwrite(currentBuffer, 1, currentSize, f); fclose(f); }
+        fprintf(stderr, "[MotionDetector] Uszkodzona klatka current - rozmiar: %zu\n", currentSize);
+        return false;
+    }
+    if (prevFrame.empty())
+    {
+        FILE *f = fopen("/tmp/bad_frame_prev.jpg", "wb");
+        if (f) { fwrite(prevBuffer, 1, prevSize, f); fclose(f); }
+        fprintf(stderr, "[MotionDetector] Uszkodzona klatka prev - rozmiar: %zu\n", prevSize);
+        return false;
+    }
 
     // konwersja do skali szarości
     Mat gray, prevGray;

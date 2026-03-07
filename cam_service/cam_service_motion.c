@@ -18,7 +18,7 @@
 #define LWS_TIMEOUT 100
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MIN_INTERVAL MIN(FPS_INTERVAL, JSON_INTERVAL_MS)
-#define FRAME_ANALYZE_STEP 10
+#define FRAME_ANALYZE_STEP 30
 
 typedef struct {
     volatile bool connectionEstablished;
@@ -75,7 +75,21 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
         state->frameCounter = 0;
     }
     
-    // analiza: tylko co FRAME_ANALYZE_STEP (3)cia klatka (10 FPS)
+    // Jeśli nie czas na klatke - po prostu pomijamy, nie zapisujemy do prev
+    // kopiowanie do wysyłania - niezależnie od analizy
+    if (state->frameCounter % STREAM_FPS == 0)
+    {
+        if(state->frameSize > 0)
+        {
+            memcpy(state->prevFrameBuffer, state->frameBuffer, state->frameSize);
+            state->prevFrameSize = state->frameSize;
+        }
+        memcpy(state->frameBuffer, frame->data, frame->data_bytes);
+        state->frameSize = frame->data_bytes;
+        state->hasNewFrame = 1;
+        state->lastStreamTime = timeNow;
+    }
+    // analiza: tylko co FRAME_ANALYZE_STEP (30)
     if(state->frameCounter % FRAME_ANALYZE_STEP == 0)
     {
         // Jeśli mamy poprzednią klatkę, analizuj
@@ -86,26 +100,13 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
                 (const unsigned char*)frame->data, frame->data_bytes,
                 state->prevFrameBuffer, state->prevFrameSize
             );
-            
             if(motionNow)
             {
                 state->motionDetectedFlag = true;
             }
         }
         
-        // zapisz obecną klatkę jako prev (dla następnej analizy)
-        memcpy(state->prevFrameBuffer, frame->data, frame->data_bytes);
-        state->prevFrameSize = frame->data_bytes;
-    }
-    // Jeśli nie czas na analizę - po prostu pomijamy, nie zapisujemy do prev
-    // kopiowanie do wysyłania - niezależnie od analizy
-    long long elapsedTime = timespecDiffMs(&state->lastStreamTime, &timeNow);
-    if (elapsedTime >= FPS_INTERVAL)
-    {
-        memcpy(state->frameBuffer, frame->data, frame->data_bytes);
-        state->frameSize = frame->data_bytes;
-        state->hasNewFrame = 1;
-        state->lastStreamTime = timeNow;
+
     }
     
     pthread_mutex_unlock(&state->mutex);
@@ -245,12 +246,12 @@ int main(void)
     signal(SIGSEGV, handleSignal);
     signal(SIGABRT, handleSignal);
 
-    FILE *logFile = fopen("/var/log/camService.log", "a");
-    if (logFile)
-    {
-        setvbuf(logFile, NULL, _IOLBF, 0);
-        stderr = logFile;
-    }
+    // FILE *logFile = fopen("/var/log/camService.log", "a");
+    // if (logFile)
+    // {
+    //     setvbuf(logFile, NULL, _IOLBF, 0);
+    //     stderr = logFile;
+    // }
 
     MotionParams motionParams = {
         .motionThreshold = 20,
@@ -393,10 +394,10 @@ int main(void)
     motion_detector_destroy(state.motionDetector);
     pthread_mutex_destroy(&state.mutex);
     
-    if (logFile)
-    {
-        fclose(logFile);
-    }
+    // if (logFile)
+    // {
+    //     fclose(logFile);
+    // }
 
     return 0;
 }
