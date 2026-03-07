@@ -246,17 +246,17 @@ int main(void)
     signal(SIGSEGV, handleSignal);
     signal(SIGABRT, handleSignal);
 
-    // FILE *logFile = fopen("/var/log/camService.log", "a");
-    // if (logFile)
-    // {
-    //     setvbuf(logFile, NULL, _IOLBF, 0);
-    //     stderr = logFile;
-    // }
+    FILE *logFile = fopen("/var/log/camService.log", "a");
+    if (logFile)
+    {
+        setvbuf(logFile, NULL, _IOLBF, 0);
+        stderr = logFile;
+    }
 
     MotionParams motionParams = {
         .motionThreshold = 20,
         .minArea = 200,
-        .gaussBlur = 15
+        .gaussBlur = 21
     };
 
     struct timespec timeNow;
@@ -394,10 +394,10 @@ int main(void)
     motion_detector_destroy(state.motionDetector);
     pthread_mutex_destroy(&state.mutex);
     
-    // if (logFile)
-    // {
-    //     fclose(logFile);
-    // }
+    if (logFile)
+    {
+        fclose(logFile);
+    }
 
     return 0;
 }
