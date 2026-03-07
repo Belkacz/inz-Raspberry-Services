@@ -18,7 +18,7 @@
 #define LWS_TIMEOUT 100
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MIN_INTERVAL MIN(FPS_INTERVAL, JSON_INTERVAL_MS)
-#define FRAME_ANALYZE_STEP 3
+#define FRAME_ANALYZE_STEP 10
 
 typedef struct {
     volatile bool connectionEstablished;
@@ -70,7 +70,7 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
     
     // Inkrementuj licznik klatek (zawsze)
     state->frameCounter++;
-    if(state->frameCounter >= 30)
+    if(state->frameCounter > 30)
     {
         state->frameCounter = 0;
     }
@@ -255,7 +255,7 @@ int main(void)
     MotionParams motionParams = {
         .motionThreshold = 20,
         .minArea = 200,
-        .gaussBlur = 21
+        .gaussBlur = 15
     };
 
     struct timespec timeNow;
