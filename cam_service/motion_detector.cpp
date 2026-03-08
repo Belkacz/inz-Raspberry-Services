@@ -21,63 +21,33 @@ void* motion_detector_init(int width, int height, MotionParams params)
 }
 
 bool motion_detector_detect(void* detector,
-                            const unsigned char* currentBuffer, size_t currentSize,
-                            const unsigned char* prevBuffer, size_t prevSize)
+    const unsigned char* currentBuffer, size_t currentSize,
+    const unsigned char* prevBuffer, size_t prevSize)
 {
-    if (!detector || !currentBuffer || currentSize == 0)
-    {
+    if(!detector || !currentBuffer || currentSize == 0)
         return false;
-    }
 
     MotionDetectorState* state = static_cast<MotionDetectorState*>(detector);
 
-    // jeśli to pierwsze wywołanie lub brak poprzedniej klatki
     if (!prevBuffer || prevSize == 0)
+        return false;
+
+    // Walidacja rozmiaru - YUYV = width * height * 2
+    size_t expectedSize = (size_t)(state->width * state->height * 2);
+    if(currentSize != expectedSize || prevSize != expectedSize)
     {
+        fprintf(stderr, "[MotionDetector] Zły rozmiar YUYV: current=%zu prev=%zu oczekiwano=%zu\n",
+                currentSize, prevSize, expectedSize);
         return false;
     }
 
-    // dekoduj aktualne klatki z MJPEG
-    std::vector<uchar> currentVec(currentBuffer, currentBuffer + currentSize);
-    Mat currentFrame = imdecode(currentVec, IMREAD_COLOR);
-    
-    std::vector<uchar> prevVec(prevBuffer, prevBuffer + prevSize);
-    Mat prevFrame = imdecode(prevVec, IMREAD_COLOR);
-
-    if (currentFrame.empty() || prevFrame.empty())
-    {
-        return false;
-    }
-    if (currentFrame.cols != state->width || currentFrame.rows != state->height ||
-    prevFrame.cols != state->width || prevFrame.rows != state->height)
-    {
-        fprintf(stderr, "[MotionDetector] Niepoprawny rozmiar klatki: current=%dx%d prev=%dx%d oczekiwano=%dx%d\n",
-                currentFrame.cols, currentFrame.rows,
-                prevFrame.cols, prevFrame.rows,
-                state->width, state->height);
-        return false;
-    }
-
-    // zapisz uszkodzoną klatkę do pliku
-    if (currentFrame.empty())
-    {
-        FILE *f = fopen("/tmp/bad_frame_current.jpg", "wb");
-        if (f) { fwrite(currentBuffer, 1, currentSize, f); fclose(f); }
-        fprintf(stderr, "[MotionDetector] Uszkodzona klatka current - rozmiar: %zu\n", currentSize);
-        return false;
-    }
-    if (prevFrame.empty())
-    {
-        FILE *f = fopen("/tmp/bad_frame_prev.jpg", "wb");
-        if (f) { fwrite(prevBuffer, 1, prevSize, f); fclose(f); }
-        fprintf(stderr, "[MotionDetector] Uszkodzona klatka prev - rozmiar: %zu\n", prevSize);
-        return false;
-    }
+    Mat currentFrame(state->height, state->width, CV_8UC2, (void*)currentBuffer);
+    Mat prevFrame   (state->height, state->width, CV_8UC2, (void*)prevBuffer);
 
     // konwersja do skali szarości
     Mat gray, prevGray;
-    cvtColor(currentFrame, gray, COLOR_BGR2GRAY);
-    cvtColor(prevFrame, prevGray, COLOR_BGR2GRAY);
+    cvtColor(currentFrame, gray, COLOR_YUV2GRAY_YUYV);
+    cvtColor(prevFrame, prevGray, COLOR_YUV2GRAY_YUYV);
 
     // rozmycie gaussa
     GaussianBlur(gray, gray, Size(state->params.gaussBlur, state->params.gaussBlur), 0);
@@ -100,10 +70,10 @@ bool motion_detector_detect(void* detector,
     findContours(thresh, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
 
     bool motionFound = false;
-    for (size_t i = 0; i < contours.size(); i++)
+    for(size_t i = 0; i < contours.size(); i++)
     {
         double area = contourArea(contours[i]);
-        if (area > state->params.minArea)
+        if(area > state->params.minArea)
         {
             motionFound = true;
             break;

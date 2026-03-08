@@ -175,7 +175,7 @@ echo ""
 # Krok 3: Instalacja CAM Service
 print_info "Krok 3: Instalacja CAM Service..."
 print_info "Sprawdzam wymagane pakiety dla CAM Service..."
-install_packages libwebsockets-dev libopencv-dev g++ gcc make pkg-config
+install_packages libwebsockets-dev libopencv-dev libuvc-dev g++ gcc make pkg-config
 
 if [ $? -eq 0 ]; then
     compile_service "cam_service" "cam"

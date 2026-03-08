@@ -18,15 +18,15 @@
 #define LWS_TIMEOUT 100
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MIN_INTERVAL MIN(FPS_INTERVAL, JSON_INTERVAL_MS)
-#define FRAME_ANALYZE_STEP 30
+#define FRAME_ANALYZE_STEP 5
 
 typedef struct {
     volatile bool connectionEstablished;
     struct timespec lastJsonSentTime;
     struct timespec lastFrameSentTime;
-    unsigned char frameBuffer[MAX_FRAME_SIZE];      // dla wysyłania przez WebSocket
+    unsigned char frameBuffer[MAX_FRAME_SIZE];
     size_t frameSize;
-    unsigned char prevFrameBuffer[MAX_FRAME_SIZE];  // dla analizy ruchu
+    unsigned char prevFrameBuffer[MAX_FRAME_SIZE];
     size_t prevFrameSize;
     volatile int hasNewFrame;
     volatile int frameCounter;
@@ -35,47 +35,34 @@ typedef struct {
     pthread_mutex_t mutex;
 } AppState;
 
-// funkcja do liczenia różnicy w czasie
 static long long timespecDiffMs(struct timespec *start, struct timespec *end)
 {
-    return (end->tv_sec - start->tv_sec) * 1000LL + 
+    return (end->tv_sec - start->tv_sec) * 1000LL +
            (end->tv_nsec - start->tv_nsec) / 1000000LL;
 }
 
 static void callbackUVC(uvc_frame_t *frame, void *ptr)
 {
     AppState *state = (AppState*)ptr;
-    
+
     if (!state->connectionEstablished)
+        return;
+
+    if (!frame || frame->data_bytes == 0 || frame->data_bytes > MAX_FRAME_SIZE)
     {
+        fprintf(stderr, "[callbackUVC] Nieprawidłowa klatka YUYV\n");
         return;
     }
-    
-    // sprawdzanie poprawności klatki
-    if (!frame ||
-        frame->data_bytes == 0 ||
-        ((unsigned char*)frame->data)[0] != 0xFF ||
-        ((unsigned char*)frame->data)[1] != 0xD8 ||
-        frame->data_bytes > MAX_FRAME_SIZE)
-    {
-        fprintf(stderr, "[callbackUVC] Odrzucono uszkodzoną klatkę JPEG\n");
-        return;
-    }
-    
-    struct timespec timeNow;
-    clock_gettime(CLOCK_MONOTONIC, &timeNow);
-    
+
     pthread_mutex_lock(&state->mutex);
-    
-    // Inkrementuj licznik klatek (zawsze)
+
     state->frameCounter++;
     if(state->frameCounter > 30)
     {
         state->frameCounter = 0;
     }
-    
+
     // Jeśli nie czas na klatke - po prostu pomijamy, nie zapisujemy do prev
-    // kopiowanie do wysyłania - niezależnie od analizy
     if (state->frameCounter % STREAM_FPS == 0)
     {
         if(state->frameSize > 0)
@@ -87,7 +74,7 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
         state->frameSize = frame->data_bytes;
         state->hasNewFrame = 1;
     }
-    // analiza: tylko co FRAME_ANALYZE_STEP (30)
+    // analiza: tylko co FRAME_ANALYZE_STEP 
     if(state->frameCounter % FRAME_ANALYZE_STEP == 0)
     {
         // Jeśli mamy poprzednią klatkę, analizuj
@@ -103,8 +90,6 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
                 state->motionDetectedFlag = true;
             }
         }
-        
-
     }
     
     pthread_mutex_unlock(&state->mutex);
@@ -116,13 +101,13 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
     (void)in;
     (void)len;
     (void)user;
-    
+
     AppState *state = (AppState *)lws_context_user(lws_get_context(wsi));
     if (!state)
-    {
+        {
         return -1;
     }
-    
+
     switch (reason)
     {
     case LWS_CALLBACK_ESTABLISHED:
@@ -135,17 +120,17 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
         state->prevFrameSize = 0;
         state->frameCounter = 0;
         state->motionDetectedFlag = false;
-        
+
         struct timespec timeNow;
         clock_gettime(CLOCK_MONOTONIC, &timeNow);
         state->lastJsonSentTime = timeNow;
         state->lastFrameSentTime = timeNow;
         pthread_mutex_unlock(&state->mutex);
-        
+
         lws_callback_on_writable(wsi);
         break;
     }
-    
+
     case LWS_CALLBACK_SERVER_WRITEABLE:
     {
         if(state->connectionEstablished)
@@ -157,20 +142,20 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
                 lws_callback_on_writable(wsi);
                 break;
             }
-            
+
             struct timespec timeNow;
             clock_gettime(CLOCK_MONOTONIC, &timeNow);
             long long elapsedJsonTime = timespecDiffMs(&state->lastJsonSentTime, &timeNow);
             long long elapsedFrameTime = timespecDiffMs(&state->lastFrameSentTime, &timeNow);
-            
-            // wysyłaj JSON co 10 sekund
+
+             // wysyłaj JSON co 10 sekund
             if(elapsedJsonTime >= JSON_INTERVAL_MS)
             {
                 bool motion = state->motionDetectedFlag;
                 state->motionDetectedFlag = false;
                 state->lastJsonSentTime = timeNow;
                 pthread_mutex_unlock(&state->mutex);
-                
+
                 char jsonBuffer[512];
                 snprintf(jsonBuffer, sizeof(jsonBuffer),
                     "{\"motion\":%s,\"timestamp\":%ld}",
@@ -198,7 +183,7 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
                     state->hasNewFrame = 0;
                     state->lastFrameSentTime = timeNow;
                     pthread_mutex_unlock(&state->mutex);
-                    
+
                     lws_write(wsi, buf + LWS_PRE, frameSize, LWS_WRITE_BINARY);
                     free(buf);
                 }
@@ -206,8 +191,8 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
                 {
                     pthread_mutex_unlock(&state->mutex);
                 }
-            } 
-            else 
+            }
+            else
             {
                 pthread_mutex_unlock(&state->mutex);
             }
@@ -215,7 +200,7 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
         }
         break;
     }
-    
+
     case LWS_CALLBACK_CLOSED:
     {
         fprintf(stderr, "[WS] Klient rozłączony\n");
@@ -229,7 +214,7 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
         pthread_mutex_unlock(&state->mutex);
         break;
     }
-        
+
     default:
         break;
     }
@@ -288,7 +273,7 @@ int main(void)
     uvc_stream_ctrl_t streamCtrl;
     uvc_error_t res;
 
-    // Inicjalizacja UVC
+     // Inicjalizacja UVC
     res = uvc_init(&camContext, NULL);
     if (res < 0)
     {
@@ -315,11 +300,11 @@ int main(void)
         motion_detector_destroy(state.motionDetector);
         return 1;
     }
-    
+
     usleep(300000); // 300ms delay
-    
-    res = uvc_get_stream_ctrl_format_size(devHandler, &streamCtrl, 
-                                          UVC_FRAME_FORMAT_MJPEG, 640, 480, FPS);
+
+    res = uvc_get_stream_ctrl_format_size(devHandler, &streamCtrl,
+                                          UVC_FRAME_FORMAT_YUYV, 640, 480, FPS);
     if (res < 0)
     {
         uvc_perror(res, "get_stream_ctrl");
@@ -332,7 +317,7 @@ int main(void)
 
     // protokół WebSocket
     struct lws_protocols protocols[] =
-    {   
+    {
         { "cam-protocol", callbackWs, 0, MAX_FRAME_SIZE, 0, NULL, 0},
         { NULL, NULL, 0, 0, 0, NULL, 0 }
     };
@@ -343,7 +328,7 @@ int main(void)
     info.protocols = protocols;
     info.user = &state;
 
-    // tworzenie kontekstu WebSocket
+     // tworzenie kontekstu WebSocket
     lwsContext = lws_create_context(&info);
     if (!lwsContext)
     {
@@ -356,7 +341,7 @@ int main(void)
     }
 
     fprintf(stderr, "Serwer WebSocket działa na ws://<IP>:%d\n", PORT);
-    
+
     // start streamu z kamery
     usleep(100000); // 100ms delay
     res = uvc_start_streaming(devHandler, &streamCtrl, callbackUVC, &state, 0);
@@ -371,7 +356,7 @@ int main(void)
         return 1;
     }
     fprintf(stderr, "[CAM] Stream uruchomiony\n");
-    
+
     // główna pętla dla obsługi WebSocket
     while (!stopRequested)
     {
@@ -389,7 +374,7 @@ int main(void)
     lws_context_destroy(lwsContext);
     motion_detector_destroy(state.motionDetector);
     pthread_mutex_destroy(&state.mutex);
-    
+
     if (logFile)
     {
         fclose(logFile);

@@ -1,6 +1,6 @@
-/* ws_server_pir.c
+/* pir_service.c
    Kompilacja:
-   gcc ws_server_pir.c -o ws_server_pir -lwebsockets -lgpiod
+   gcc pir_service.c -o pir_service -lwebsockets -lgpiod -lpthread
 */
 #include <stdlib.h>
 #include <stdio.h>
@@ -23,8 +23,8 @@
 #define DISCONNECTED_DELAY 1
 
 static struct gpiod_chip *chip = NULL;
-static struct gpiod_line *line1 = NULL;
-static struct gpiod_line *line2 = NULL;
+static struct gpiod_line_request *request  = NULL;
+static struct gpiod_edge_event_buffer *eventBuffer = NULL;
 static char payload[MAX_PAYLOAD];
 static struct lws *globalWsi = NULL;
 static bool connectionEstablished = false;
@@ -32,12 +32,10 @@ static pthread_mutex_t payloadMutex = PTHREAD_MUTEX_INITIALIZER;
 
 /* callback WebSocket */
 static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
-                       void *user, void *in, size_t len)
+                      void *user, void *in, size_t len)
 {
-    (void)user;
-    (void)in;
-    (void)len;
-    
+    (void)user; (void)in; (void)len;
+
     switch (reason)
     {
         case LWS_CALLBACK_ESTABLISHED:
@@ -47,13 +45,11 @@ static int callbackWs(struct lws *wsi, enum lws_callback_reasons reason,
             break;
 
         case LWS_CALLBACK_SERVER_WRITEABLE:
-        // blokowanie mutex dla bezpieczeństwa
             pthread_mutex_lock(&payloadMutex);
             if (payload[0] != '\0' && globalWsi)
             {
                 unsigned char buffer[LWS_PRE + MAX_PAYLOAD];
                 size_t n = strlen(payload);
-                // kopiowanie payload
                 memcpy(&buffer[LWS_PRE], payload, n);
                 lws_write(globalWsi, &buffer[LWS_PRE], n, LWS_WRITE_TEXT);
                 payload[0] = '\0';
@@ -88,35 +84,83 @@ int main(void)
     {
         setvbuf(logFile, NULL, _IOLBF, 0);
         stderr = logFile;
-        setvbuf(stderr, NULL, _IONBF, 0);
     }
 
-    // GPIO initialization
-    chip = gpiod_chip_open_by_name("gpiochip0");
+    // GPIO initialization, otwieramy chip przez ścieżkę
+    chip = gpiod_chip_open("/dev/gpiochip0");
     if (!chip)
     {
-        fprintf(stderr, "Błąd: nie można otworzyć gpiochip0\n");
+        fprintf(stderr, "Błąd: nie można otworzyć /dev/gpiochip0\n");
         return 1;
     }
-    // przypisanie czujników do zmiennych
-    line1 = gpiod_chip_get_line(chip, PIR_PIN1);
-    line2 = gpiod_chip_get_line(chip, PIR_PIN2);
-    if (!line1 || !line2)
+
+    // konfiguracja linii – nasłuchiwanie obu zboczy
+    struct gpiod_line_settings *settings = gpiod_line_settings_new();
+    if (!settings)
     {
-        fprintf(stderr, "Błąd: nie można pobrać linii GPIO\n");
+        fprintf(stderr, "Błąd: gpiod_line_settings_new\n");
+        gpiod_chip_close(chip);
+        return 1;
+    }
+    gpiod_line_settings_set_direction(settings, GPIOD_LINE_DIRECTION_INPUT);
+    gpiod_line_settings_set_edge_detection(settings, GPIOD_LINE_EDGE_RISING);
+
+    // budujemy konfigurację requestu
+    struct gpiod_request_config *requestConfig = gpiod_request_config_new();
+    if (!requestConfig)
+    {
+        fprintf(stderr, "Błąd: gpiod_request_config_new\n");
+        gpiod_line_settings_free(settings);
+        gpiod_chip_close(chip);
+        return 1;
+    }
+    gpiod_request_config_set_consumer(requestConfig, "pir_ws");
+
+    struct gpiod_line_config *lineConfig = gpiod_line_config_new();
+    if (!lineConfig)
+    {
+        fprintf(stderr, "Błąd: gpiod_line_config_new\n");
+        gpiod_request_config_free(requestConfig);
+        gpiod_line_settings_free(settings);
         gpiod_chip_close(chip);
         return 1;
     }
 
-    if (gpiod_line_request_both_edges_events(line1, "pir_ws") < 0 ||
-        gpiod_line_request_both_edges_events(line2, "pir_ws") < 0)
+    unsigned int offsets[2] = {PIR_PIN1, PIR_PIN2};
+    if (gpiod_line_config_add_line_settings(lineConfig, offsets, 2, settings) < 0)
     {
-        fprintf(stderr, "Błąd: nie można zarejestrować eventów GPIO\n");
+        fprintf(stderr, "Błąd: gpiod_line_config_add_line_settings\n");
+        gpiod_line_config_free(lineConfig);
+        gpiod_request_config_free(requestConfig);
+        gpiod_line_settings_free(settings);
         gpiod_chip_close(chip);
         return 1;
     }
 
-    // WebSocket initialization
+    // żądanie dostępu do linii
+    request = gpiod_chip_request_lines(chip, requestConfig, lineConfig);
+    gpiod_line_config_free(lineConfig);
+    gpiod_request_config_free(requestConfig);
+    gpiod_line_settings_free(settings);
+
+    if (!request)
+    {
+        fprintf(stderr, "Błąd: gpiod_chip_request_lines\n");
+        gpiod_chip_close(chip);
+        return 1;
+    }
+
+    // bufor na eventy (max 2 eventy naraz)
+    eventBuffer = gpiod_edge_event_buffer_new(2);
+    if (!eventBuffer)
+    {
+        fprintf(stderr, "Błąd: gpiod_edge_event_buffer_new\n");
+        gpiod_line_request_release(request);
+        gpiod_chip_close(chip);
+        return 1;
+    }
+
+   // WebSocket initialization
     struct lws_context_creation_info info;
     memset(&info, 0, sizeof(info));
     info.port = PORT;
@@ -126,60 +170,54 @@ int main(void)
     if (!lwsContext)
     {
         fprintf(stderr, "Błąd: nie udało się utworzyć kontekstu LWS\n");
+        gpiod_edge_event_buffer_free(eventBuffer);
+        gpiod_line_request_release(request);
         gpiod_chip_close(chip);
         return 1;
     }
 
-    printf("Serwer WebSocket działa na ws://<IP>:%d\n", PORT);
-    // inicjalizcja linii
-    struct gpiod_line_bulk bulk, activated;
-    gpiod_line_bulk_init(&bulk);
-    gpiod_line_bulk_add(&bulk, line1);
-    gpiod_line_bulk_add(&bulk, line2);
+    fprintf(stderr, "Serwer WebSocket działa na ws://<IP>:%d\n", PORT);
 
-    struct gpiod_line_event event;
     int counterRising[2] = {0, 0}; // [0] dla GPIO26, [0] dla GPIO16
     time_t lastServiceTime = 0;
-    
+
     // Wyślij początkowy stan mutex dla bezpieczeństwa
     pthread_mutex_lock(&payloadMutex);
     snprintf(payload, sizeof(payload),
-        "{\"pir%dRisingCounter\":0,\"pir%dRisingCounter\":0,\"time\":%ld}", 
+        "{\"pir%dRisingCounter\":0,\"pir%dRisingCounter\":0,\"time\":%ld}",
         PIR_PIN1, PIR_PIN2, (long)time(NULL));
     pthread_mutex_unlock(&payloadMutex);
-    
+
+    // główna pętla
     while (!stopRequested)
     {
-        time_t now = time(NULL);
-        struct timespec timeout;
-        
+        long long timeout;
         // ustaw timeout w zależności od stanu połączenia
         if (connectionEstablished)
         {
-            timeout.tv_sec = STD_DELAY;
+            timeout = (long long)STD_DELAY * 1000000000LL;
         }
         else
         {
-            timeout.tv_sec = DISCONNECTED_DELAY;
+            timeout = (long long)DISCONNECTED_DELAY * 1000000000LL;
         }
-        timeout.tv_nsec = 0;
-        
-        // czekaj na eventy GPIO
-        int ret = gpiod_line_event_wait_bulk(&bulk, &timeout, &activated);
+
+        // czekaj na eventy GPIO ( wait_edge_events zwraca liczbę eventów)
+        int ret = gpiod_line_request_wait_edge_events(request, timeout);
         if (ret > 0)
         {
-            // iteracjac po liniach
-            for (unsigned int i = 0; i < gpiod_line_bulk_num_lines(&activated); i++)
+            int eventsNum = gpiod_line_request_read_edge_events(request, eventBuffer, 2);
+            for (int i = 0; i < eventsNum; i++)
             {
-                struct gpiod_line *line = gpiod_line_bulk_get_line(&activated, i);
-                if (gpiod_line_event_read(line, &event) == 0)
+                struct gpiod_edge_event *event = gpiod_edge_event_buffer_get_event(eventBuffer, (unsigned long)i);
+                if (event)
                 {
-                    unsigned int offset = gpiod_line_offset(line);
-                    
+                    enum gpiod_edge_event_type type = gpiod_edge_event_get_event_type(event);
+                    unsigned int offset = gpiod_edge_event_get_line_offset(event);
+
                     // sprawdzenie eventów
-                    if (event.event_type == GPIOD_LINE_EVENT_RISING_EDGE)
+                    if (type == GPIOD_EDGE_EVENT_RISING_EDGE)
                     {
-                        // inkrementacja liczników
                         if (offset == PIR_PIN1)
                         {
                             counterRising[0]++;
@@ -192,7 +230,7 @@ int main(void)
                 }
             }
         }
-        
+        time_t now = time(NULL);
         // Określ czy wysłać dane
         int delay = connectionEstablished ? STD_DELAY : DISCONNECTED_DELAY;
         if (difftime(now, lastServiceTime) >= delay)
@@ -208,9 +246,9 @@ int main(void)
             {
                 lws_callback_on_writable(globalWsi);
             }
-            
+
             lastServiceTime = now;
-            
+
             // Reset liczników
             counterRising[0] = 0;
             counterRising[1] = 0;
@@ -220,9 +258,11 @@ int main(void)
     }
 
     // Cleanup
+    gpiod_edge_event_buffer_free(eventBuffer);
+    gpiod_line_request_release(request);
     gpiod_chip_close(chip);
     lws_context_destroy(lwsContext);
-    
+
     if (logFile)
     {
         fclose(logFile);
