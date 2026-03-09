@@ -32,7 +32,7 @@ bool motion_detector_detect(void* detector,
     if (!prevBuffer || prevSize == 0)
         return false;
 
-    // Walidacja rozmiaru - YUYV = width * height * 2
+    // walidacja rozmiaru - YUYV = width * height * 2
     size_t expectedSize = (size_t)(state->width * state->height * 2);
     if(currentSize != expectedSize || prevSize != expectedSize)
     {

@@ -13,12 +13,13 @@
 #define MAX_FRAME_SIZE (2 * 1024 * 1024)
 #define FPS 30
 #define STREAM_FPS 5
+#define STREAM_STEP (FPS / STREAM_FPS)  // = 30/5 = 6
 #define FPS_INTERVAL (1000 / STREAM_FPS)
 #define JSON_INTERVAL_MS 10000
 #define LWS_TIMEOUT 100
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define MIN_INTERVAL MIN(FPS_INTERVAL, JSON_INTERVAL_MS)
-#define FRAME_ANALYZE_STEP 5
+#define FRAME_ANALYZE_STEP 15
 
 typedef struct {
     volatile bool connectionEstablished;
@@ -48,9 +49,10 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
     if (!state->connectionEstablished)
         return;
 
-    if (!frame || frame->data_bytes == 0 || frame->data_bytes > MAX_FRAME_SIZE)
+    if (!frame || frame->data_bytes != (size_t)(640 * 480 * 2))
     {
-        fprintf(stderr, "[callbackUVC] Nieprawidłowa klatka YUYV\n");
+        fprintf(stderr, "[callbackUVC] Nieprawidłowa klatka: %zu bajtów\n",
+                frame ? frame->data_bytes : 0);
         return;
     }
 
@@ -63,7 +65,7 @@ static void callbackUVC(uvc_frame_t *frame, void *ptr)
     }
 
     // Jeśli nie czas na klatke - po prostu pomijamy, nie zapisujemy do prev
-    if (state->frameCounter % STREAM_FPS == 0)
+    if (state->frameCounter % STREAM_STEP == 0)
     {
         if(state->frameSize > 0)
         {
